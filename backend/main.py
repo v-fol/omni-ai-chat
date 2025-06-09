@@ -13,6 +13,7 @@ from datetime import datetime
 import uuid
 import base64
 import json
+from pydantic import BaseModel
 
 from db.engine import User, Chat, Message, init as init_db
 
@@ -74,6 +75,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+class CreateChatRequest(BaseModel):
+    first_message: str
 
 @app.get("/")
 def read_root():
@@ -148,20 +152,55 @@ async def auth_status(request: Request):
         return Response(status_code=401)
 
 @app.post("/chat")
-async def create_chat(request: Request):
+async def create_chat(request: Request, body: CreateChatRequest):
     user = await get_current_user(request)
     if not user:
         raise HTTPException(status_code=401, detail="Not authenticated")
     
+    # Generate title from the first message
+    words = body.first_message.split()[:10]
+    title = " ".join(words)
+    if len(body.first_message.split()) > 10:
+        title += "..."
+
+    # Create the new chat
     new_chat = Chat(
         user_id=str(user.id),
-        title="New Chat",  # Will be updated with first message
+        title=title,
         created_at=datetime.now(),
         updated_at=datetime.now()
     )
     await new_chat.insert()
     
-    return {"chat_id": str(new_chat.id)}
+    # Create and save the first user message
+    user_message = Message(
+        chat_id=str(new_chat.id),
+        from_user=True,
+        content=body.first_message,
+        model="user",
+        created_at=datetime.now()
+    )
+    await user_message.insert()
+
+    print(f"Created new chat {new_chat.id} with title '{title}' and first message.")
+    
+    # Return the full new chat object, making sure IDs are strings
+    return {
+        "id": str(new_chat.id),
+        "title": new_chat.title,
+        "created_at": new_chat.created_at,
+        "updated_at": new_chat.updated_at,
+        "messages": [{
+            "id": str(user_message.id),
+            "chat_id": str(new_chat.id),
+            "from_user": user_message.from_user,
+            "content": user_message.content,
+            "model": user_message.model,
+            "created_at": user_message.created_at,
+            "is_complete": user_message.is_complete,
+            "status": user_message.status,
+        }]
+    }
 
 @app.get("/chats")
 async def get_chats(request: Request):
@@ -288,39 +327,35 @@ async def chat_websocket(websocket: WebSocket, chat_id: str):
         print(f"WebSocket connection established for user {user.email} and chat {chat_id}")
         
         while True:
-            # Receive message from client
             message_text = await websocket.receive_text()
             print(f"Received message: {message_text}")
             
-            # Check if this is the first user message for this chat
-            is_first_message = (
-                await Message.find_one(
-                    Message.chat_id == chat_id, Message.from_user == True
-                )
-                is None
-            )
+            # Check if the received message is a duplicate of the first message saved via HTTP
+            # to prevent creating a duplicate entry.
+            message_count = await Message.find(
+                {"chat_id": chat_id, "from_user": True}
+            ).count()
             
-            # Create and save user message
-            user_message = Message(
-                chat_id=chat_id,
-                from_user=True,
-                content=message_text,
-                model="user",
-                created_at=datetime.now(),
-            )
-            await user_message.insert()
+            should_save = True
+            if message_count == 1:
+                first_message = await Message.find_one(
+                    {"chat_id": chat_id, "from_user": True}
+                )
+                if first_message and first_message.content == message_text:
+                    print("Kick-off message is the same as the one saved via HTTP. Skipping save.")
+                    should_save = False
 
-            # If it's the first message, update the chat title automatically
-            if is_first_message:
-                words = message_text.split()[:10]
-                title = " ".join(words)
-                if len(message_text.split()) > 10:
-                    title += "..."
-                
-                chat.title = title
-                chat.updated_at = datetime.now()
-                await chat.save()
-                print(f"Automatically updated title for chat {chat_id} to '{title}'")
+            if should_save:
+                user_message = Message(
+                    chat_id=chat_id,
+                    from_user=True,
+                    content=message_text,
+                    model="user",
+                    created_at=datetime.now(),
+                )
+                await user_message.insert()
+
+            # Title is now set exclusively by the POST /chat endpoint.
             
             try:
                 # Generate streaming response

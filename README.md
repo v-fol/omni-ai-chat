@@ -27,6 +27,8 @@ Submission for the t3 chat cloneathon [https://cloneathon.t3.chat/](https://clon
 #### 3. Data management
 
 - [X] Chat history persistence
+- [X] Chat history pagination
+- [ ] Structute chats in folders
 - [ ] Chat sharing with unique URLs
 - [ ] Message search functionality
 
