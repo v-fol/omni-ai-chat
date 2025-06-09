@@ -155,7 +155,7 @@ async def create_chat(request: Request):
     
     new_chat = Chat(
         user_id=str(user.id),
-        title="New Chat",
+        title="New Chat",  # Will be updated with first message
         created_at=datetime.now(),
         updated_at=datetime.now()
     )
@@ -171,7 +171,16 @@ async def get_chats(request: Request):
     
     # Get all chats for the user, sorted by updated_at
     chats = await Chat.find(Chat.user_id == str(user.id)).sort(-Chat.updated_at).to_list()
-    return {"chats": [{"id": str(chat.id), "title": chat.title, "updated_at": chat.updated_at} for chat in chats]}
+    
+    # Format the response with more details
+    return {
+        "chats": [{
+            "id": str(chat.id),
+            "title": chat.title,
+            "created_at": chat.created_at,
+            "updated_at": chat.updated_at
+        } for chat in chats]
+    }
 
 @app.get("/chat/{chat_id}")
 async def get_chat(chat_id: str, request: Request):
@@ -199,6 +208,29 @@ async def get_chat(chat_id: str, request: Request):
             "is_complete": msg.is_complete
         } for msg in messages]
     }
+
+@app.delete("/chat/{chat_id}")
+async def delete_chat(chat_id: str, request: Request):
+    user = await get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    # Get chat and verify ownership
+    chat = await Chat.get(chat_id)
+    if not chat or chat.user_id != str(user.id):
+        raise HTTPException(status_code=404, detail="Chat not found")
+    
+    try:
+        # Delete all messages in the chat
+        await Message.find(Message.chat_id == chat_id).delete()
+        
+        # Delete the chat
+        await chat.delete()
+        
+        return {"message": "Chat deleted successfully"}
+    except Exception as e:
+        print(f"Error deleting chat: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete chat")
 
 @app.websocket("/chat/{chat_id}/ws")
 async def chat_websocket(websocket: WebSocket, chat_id: str):
@@ -260,15 +292,35 @@ async def chat_websocket(websocket: WebSocket, chat_id: str):
             message_text = await websocket.receive_text()
             print(f"Received message: {message_text}")
             
+            # Check if this is the first user message for this chat
+            is_first_message = (
+                await Message.find_one(
+                    Message.chat_id == chat_id, Message.from_user == True
+                )
+                is None
+            )
+            
             # Create and save user message
             user_message = Message(
                 chat_id=chat_id,
                 from_user=True,
                 content=message_text,
                 model="user",
-                created_at=datetime.now()
+                created_at=datetime.now(),
             )
             await user_message.insert()
+
+            # If it's the first message, update the chat title automatically
+            if is_first_message:
+                words = message_text.split()[:10]
+                title = " ".join(words)
+                if len(message_text.split()) > 10:
+                    title += "..."
+                
+                chat.title = title
+                chat.updated_at = datetime.now()
+                await chat.save()
+                print(f"Automatically updated title for chat {chat_id} to '{title}'")
             
             try:
                 # Generate streaming response

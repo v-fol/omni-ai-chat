@@ -4,8 +4,8 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
 import { useTheme } from '@/lib/theme-context';
-import { chatPositionAtom, isAutoScrollAtom, sidebarCollapsedAtom, chatMessagesAtom, isLoadingAtom, userAtom, activeChatIdAtom } from '@/lib/atoms';
-import type { Message as MessageType } from '@/lib/atoms';
+import { chatPositionAtom, isAutoScrollAtom, sidebarCollapsedAtom, chatMessagesAtom, isLoadingAtom, userAtom, activeChatIdAtom, chatsAtom, isDraftChatAtom } from '@/lib/atoms';
+import type { Message as MessageType, Chat } from '@/lib/atoms';
 import { useEffect, useRef, useState } from 'react';
 import { connectWebSocket, sendMessage, closeWebSocket } from '@/lib/websocket';
 import {
@@ -90,7 +90,9 @@ export function ChatLayout({ children }: ChatLayoutProps) {
   const [messages, setMessages] = useAtom(chatMessagesAtom);
   const [isLoading, setIsLoading] = useAtom(isLoadingAtom);
   const [user, setUser] = useAtom(userAtom);
-  const [activeChatId] = useAtom(activeChatIdAtom);
+  const [activeChatId, setActiveChatId] = useAtom(activeChatIdAtom);
+  const [chats, setChats] = useAtom(chatsAtom);
+  const [isDraft, setIsDraft] = useAtom(isDraftChatAtom);
   const [inputValue, setInputValue] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
@@ -136,28 +138,41 @@ export function ChatLayout({ children }: ChatLayoutProps) {
     checkAuth();
   }, []);
 
+  // Clear messages when switching chats or starting a new chat
+  useEffect(() => {
+    if (isDraft) {
+      setMessages([]);
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+    }
+  }, [isDraft]);
+
   // Load chat messages when active chat changes
   useEffect(() => {
     const loadChatMessages = async () => {
-      if (!activeChatId) {
-        setMessages([]);
+      if (!activeChatId || isDraft) {
         return;
       }
 
       try {
+        console.log('Loading messages for chat:', activeChatId);
         const response = await fetch(`http://localhost:8000/chat/${activeChatId}`, {
           credentials: 'include',
         });
         
         if (response.ok) {
           const chat = await response.json();
-          setMessages(chat.messages.map((msg: any) => ({
+          const loadedMessages = chat.messages.map((msg: any) => ({
             content: msg.content,
             isUser: msg.from_user,
             timestamp: new Date(msg.created_at),
             status: msg.status,
             isComplete: msg.is_complete
-          })));
+          }));
+          console.log('Loaded messages:', loadedMessages);
+          setMessages(loadedMessages);
         }
       } catch (error) {
         console.error('Failed to load chat messages:', error);
@@ -165,101 +180,202 @@ export function ChatLayout({ children }: ChatLayoutProps) {
     };
 
     loadChatMessages();
-  }, [activeChatId]);
+  }, [activeChatId, isDraft]);
 
-  // Update WebSocket connection when active chat changes
+  // Handle WebSocket connection
   useEffect(() => {
-    if (!activeChatId || !user) {
+    if (!activeChatId || isDraft || !user) {
       if (wsRef.current) {
-        closeWebSocket();
+        wsRef.current.close();
         wsRef.current = null;
       }
       return;
     }
 
-    const ws = connectWebSocket(
+    console.log('Creating WebSocket for chat:', activeChatId);
+    wsRef.current = connectWebSocket(
       `ws://localhost:8000/chat/${activeChatId}/ws`,
-      (text: string) => {
-        if (text === '[DONE]') {
-          setIsStreaming(false);
-          setIsLoading(false);
-          setMessages(prev => {
-            const lastMessage = prev[prev.length - 1];
-            if (lastMessage && !lastMessage.isUser) {
-              const messagesWithoutLast = prev.slice(0, -1);
-              return [...messagesWithoutLast, {
-                ...lastMessage,
-                status: 'complete',
-                isComplete: true
-              }];
-            }
-            return prev;
-          });
-        } else {
-          setMessages(prev => {
-            const lastMessage = prev[prev.length - 1];
-            if (lastMessage && !lastMessage.isUser && lastMessage.status === 'streaming') {
-              const messagesWithoutLast = prev.slice(0, -1);
-              return [...messagesWithoutLast, {
-                ...lastMessage,
-                content: lastMessage.content + text
-              }];
-            } else {
-              return [...prev, {
-                content: text,
-                isUser: false,
-                timestamp: new Date(),
-                status: 'streaming',
-                isComplete: false
-              }];
-            }
-          });
-          setIsStreaming(true);
-        }
-      },
-      (error: Error) => {
-        console.error('WebSocket error:', error);
-        setIsLoading(false);
-        setIsStreaming(false);
-        setMessages(prev => {
-          const lastMessage = prev[prev.length - 1];
-          if (lastMessage && !lastMessage.isUser) {
-            const messagesWithoutLast = prev.slice(0, -1);
-            return [...messagesWithoutLast, {
-              ...lastMessage,
-              status: 'incomplete',
-              isComplete: false
-            }];
-          }
-          return prev;
-        });
-      }
+      handleWebSocketMessage,
+      handleWebSocketError
     );
-
-    wsRef.current = ws;
 
     return () => {
       if (wsRef.current) {
-        closeWebSocket();
+        wsRef.current.close();
         wsRef.current = null;
       }
     };
-  }, [activeChatId, user]);
+  }, [activeChatId, isDraft, user]);
 
-  const handleSendMessage = () => {
-    if (!inputValue.trim() || isLoading || !activeChatId) return;
+  const handleSendMessage = async () => {
+    if (!inputValue.trim() || isLoading) return;
 
-    const newMessage: MessageType = {
-      content: inputValue,
+    const messageText = inputValue.trim();
+    setInputValue('');
+    
+    let chatId = activeChatId;
+    let isNewChat = false;
+
+    // Step 1: Create chat if needed
+    if (isDraft) {
+      console.log('Creating new chat...');
+      isNewChat = true;
+      try {
+        const response = await fetch('http://localhost:8000/chat', {
+          method: 'POST',
+          credentials: 'include',
+        });
+        
+        if (!response.ok) {
+          console.error('Failed to create chat');
+          setInputValue(messageText);
+          return;
+        }
+
+        const data = await response.json();
+        chatId = data.chat_id;
+        console.log('Created chat with ID:', chatId);
+
+        // Create title from first message
+        const words = messageText.split(' ').slice(0, 10);
+        const title = words.join(' ') + (messageText.split(' ').length > 10 ? '...' : '');
+        
+        // Add chat to list
+        setChats(prev => [{
+          id: chatId!,
+          title,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          messages: []
+        }, ...prev]);
+        
+        // Switch to the new chat
+        setIsDraft(false);
+        setActiveChatId(chatId);
+        
+        console.log('Chat created, waiting for WebSocket...');
+        // Wait for WebSocket to be ready
+        await new Promise(resolve => setTimeout(resolve, 500));
+      } catch (error) {
+        console.error('Failed to create chat:', error);
+        setInputValue(messageText);
+        return;
+      }
+    }
+
+    if (!chatId) {
+      console.error('No chat ID available');
+      setInputValue(messageText);
+      return;
+    }
+
+    // Step 2: Add user message to UI immediately
+    const userMessage: MessageType = {
+      content: messageText,
       isUser: true,
       timestamp: new Date()
     };
-
-    setMessages(prev => [...prev, newMessage]);
+    
+    console.log('Adding user message to UI');
+    setMessages(prev => [...prev, userMessage]);
     setIsLoading(true);
+
+    // Step 3: Wait for WebSocket and send message
+    try {
+      // Wait for WebSocket to be ready
+      let wsReady = false;
+      for (let i = 0; i < 50; i++) { // 5 seconds max
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          wsReady = true;
+          break;
+        }
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+
+      if (!wsReady) {
+        throw new Error('WebSocket not ready');
+      }
+
+      console.log('Sending message via WebSocket:', messageText);
+      const sent = sendMessage(messageText);
+      if (!sent) {
+        throw new Error('Failed to send message via WebSocket');
+      }
+
+      // The title update is now handled by the backend.
+      // The UI will be eventually consistent on the next chat list refresh.
+      
+    } catch (error) {
+      console.error('Failed to send message:', error);
+      setIsLoading(false);
+      alert('Failed to send message. Please try again.');
+    }
+  };
+
+  const handleWebSocketMessage = (text: string) => {
+    console.log('Received WebSocket message:', text);
+    
+    if (text === '[DONE]') {
+      console.log('Stream completed');
+      setIsStreaming(false);
+      setIsLoading(false);
+      // Update the last message to mark it as complete
+      setMessages(prev => {
+        const lastMessage = prev[prev.length - 1];
+        if (lastMessage && !lastMessage.isUser) {
+          const messagesWithoutLast = prev.slice(0, -1);
+          return [...messagesWithoutLast, {
+            ...lastMessage,
+            status: 'complete',
+            isComplete: true
+          }];
+        }
+        return prev;
+      });
+    } else {
+      console.log('Received chunk:', text.substring(0, 50) + '...');
+      setMessages(prev => {
+        const lastMessage = prev[prev.length - 1];
+        if (lastMessage && !lastMessage.isUser && (lastMessage.status === 'streaming' || !lastMessage.status)) {
+          // Update existing AI message
+          const messagesWithoutLast = prev.slice(0, -1);
+          return [...messagesWithoutLast, {
+            ...lastMessage,
+            content: lastMessage.content + text,
+            status: 'streaming'
+          }];
+        } else {
+          // Create new AI message
+          return [...prev, {
+            content: text,
+            isUser: false,
+            timestamp: new Date(),
+            status: 'streaming',
+            isComplete: false
+          }];
+        }
+      });
+      setIsStreaming(true);
+    }
+  };
+
+  const handleWebSocketError = (error: Error) => {
+    console.error('WebSocket error:', error);
+    setIsLoading(false);
     setIsStreaming(false);
-    sendMessage(inputValue);
-    setInputValue('');
+    // Mark the last message as incomplete if there's an error
+    setMessages(prev => {
+      const lastMessage = prev[prev.length - 1];
+      if (lastMessage && !lastMessage.isUser) {
+        const messagesWithoutLast = prev.slice(0, -1);
+        return [...messagesWithoutLast, {
+          ...lastMessage,
+          status: 'incomplete',
+          isComplete: false
+        }];
+      }
+      return prev;
+    });
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
