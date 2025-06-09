@@ -30,7 +30,6 @@ interface MessageProps {
   content: string;
   isUser: boolean;
   timestamp: Date;
-  isStreaming?: boolean;
   status?: 'complete' | 'incomplete' | 'streaming';
   isComplete?: boolean;
 }
@@ -41,7 +40,7 @@ interface CustomCodeProps extends React.HTMLAttributes<HTMLElement> {
   children?: React.ReactNode;
 }
 
-export function Message({ content, isUser, timestamp, isStreaming, status, isComplete }: MessageProps) {
+export function Message({ content, isUser, timestamp, status, isComplete }: MessageProps) {
   const { theme } = useTheme();
   const [copiedStates, setCopiedStates] = useState<Record<string, boolean>>({});
 
@@ -169,9 +168,6 @@ export function Message({ content, isUser, timestamp, isStreaming, status, isCom
               >
                 {content || ''}
               </Markdown>
-            )}
-            {isStreaming && (
-              <span className="inline-block w-1.5 h-4 ml-1 bg-current opacity-50 animate-pulse" />
             )}
           </div>
         </div>

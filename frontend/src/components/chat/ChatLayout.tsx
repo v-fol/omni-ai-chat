@@ -94,7 +94,6 @@ export function ChatLayout({ children }: ChatLayoutProps) {
   const [chats, setChats] = useAtom(chatsAtom);
   const [isDraft, setIsDraft] = useAtom(isDraftChatAtom);
   const [inputValue, setInputValue] = useState('');
-  const [isStreaming, setIsStreaming] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   
@@ -107,10 +106,9 @@ export function ChatLayout({ children }: ChatLayoutProps) {
   useEffect(() => {
     console.log('Rendering state:', {
       messages,
-      isStreaming,
       isLoading
     });
-  }, [messages, isStreaming, isLoading]);
+  }, [messages, isLoading]);
 
   // Scroll to bottom when messages change
   useEffect(() => {
@@ -317,7 +315,6 @@ export function ChatLayout({ children }: ChatLayoutProps) {
     
     if (text === '[DONE]') {
       console.log('Stream completed');
-      setIsStreaming(false);
       setIsLoading(false);
       // Update the last message to mark it as complete
       setMessages(prev => {
@@ -355,14 +352,12 @@ export function ChatLayout({ children }: ChatLayoutProps) {
           }];
         }
       });
-      setIsStreaming(true);
     }
   };
 
   const handleWebSocketError = (error: Error) => {
     console.error('WebSocket error:', error);
     setIsLoading(false);
-    setIsStreaming(false);
     // Mark the last message as incomplete if there's an error
     setMessages(prev => {
       const lastMessage = prev[prev.length - 1];
@@ -590,16 +585,10 @@ export function ChatLayout({ children }: ChatLayoutProps) {
                     content={message.content}
                     isUser={message.isUser}
                     timestamp={message.timestamp}
+                    status={message.status}
+                    isComplete={message.isComplete}
                   />
                 ))}
-                {isStreaming && (
-                  <Message
-                    content="..."
-                    isUser={false}
-                    timestamp={new Date()}
-                    isStreaming={true}
-                  />
-                )}
               </div>
             </ScrollArea>
           </div>
