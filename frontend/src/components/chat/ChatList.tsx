@@ -88,7 +88,7 @@ export function ChatList() {
               to="/chat/$chatId"
               params={{ chatId: chat.id }}
               className={cn(
-                "group relative flex items-center justify-start gap-3 w-full h-auto py-3 px-3",
+                "group relative flex items-center justify-start gap-3 w-full h-auto py-3 px-3 dark:bg-neutral-900 dark:text-neutral-00 light:bg-neutral-100 light:text-neutral-900",
                 "text-left rounded-lg",
                 "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
               )}
