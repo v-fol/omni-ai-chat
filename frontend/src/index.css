@@ -121,3 +121,5 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* No additional CSS needed - using inline transitions */

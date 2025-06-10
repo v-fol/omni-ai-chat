@@ -214,6 +214,22 @@ function ChatComponent() {
     }
   }, [messages.map(m => m.status).join(',')]); // Trigger when any message status changes
 
+  // Scroll to bottom when chat loads or switches (only for initial load, not during streaming)
+  useEffect(() => {
+    if (messages.length > 0) {
+      const scrollViewport = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
+      if (scrollViewport) {
+        // Only scroll if not currently streaming (to avoid conflicts with auto-scroll)
+        const lastMessage = messages.at(-1);
+        const isStreaming = lastMessage && !lastMessage.isUser && lastMessage.status === 'streaming';
+        
+        if (!isStreaming) {
+          scrollViewport.scrollTop = scrollViewport.scrollHeight;
+        }
+      }
+    }
+  }, [chatId, messages.length]); // Only trigger on chat switch or initial message load
+
   useEffect(() => {
     if (!chatId || !user) return;
 
@@ -600,7 +616,10 @@ function ChatComponent() {
   return (
     <div className={cn("flex-1 flex", chatPosition === 'right' ? 'flex-row' : 'flex-col', chatPosition === 'top' && 'flex-col-reverse')}>
       <div className="flex-1 min-h-0 ">
-        <ScrollArea className="h-full dark:bg-neutral-800 dark:text-neutral-100 " ref={scrollAreaRef as React.RefObject<HTMLDivElement>}>
+        <ScrollArea 
+          className="h-full dark:bg-neutral-800 dark:text-neutral-100" 
+          ref={scrollAreaRef as React.RefObject<HTMLDivElement>}
+        >
           <div className="p-6 w-3/4 mx-auto space-y-4">
             {messages.map((message, index) => (
               <div key={index} className="message-item">

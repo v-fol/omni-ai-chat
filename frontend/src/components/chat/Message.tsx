@@ -51,6 +51,31 @@ interface CustomCodeProps extends React.HTMLAttributes<HTMLElement> {
 export function Message({ content, isUser, timestamp, status, isComplete }: MessageProps) {
   const { theme } = useTheme();
   const [copiedStates, setCopiedStates] = useState<Record<string, boolean>>({});
+  const [displayedContent, setDisplayedContent] = useState('');
+  const [containerHeight, setContainerHeight] = useState<number | undefined>(undefined);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const isStreaming = status === 'streaming';
+
+  // Smooth content streaming with height animation
+  useEffect(() => {
+    if (isUser || status === 'complete') {
+      // For user messages or completed AI messages, show everything immediately
+      setDisplayedContent(content);
+      setContainerHeight(undefined); // Let it be auto
+      return;
+    }
+
+    if (status === 'streaming') {
+      // Update content and animate height
+      setDisplayedContent(content);
+      
+      // Measure content height for smooth animation
+      if (contentRef.current) {
+        const newHeight = contentRef.current.scrollHeight;
+        setContainerHeight(newHeight);
+      }
+    }
+  }, [content, status, isUser]);
 
   const handleCopyCode = (code: string, uniqueId: string) => {
     navigator.clipboard.writeText(code).then(() => {
@@ -128,9 +153,9 @@ export function Message({ content, isUser, timestamp, status, isComplete }: Mess
           </SyntaxHighlighter>
         </div>
       ) : !inline ? (
-        <pre className="dark:bg-neutral-900 bg-neutral-300 bg-opacity-50 dark:text-slate-300 text-neutral-900 pt-0.5 my-0.5 px-2 mx-1 rounded-lg text-sm inline-flex max-w-[600px] overflow-x-auto scrollbar-thin scrollbar-thumb-neutral-600 scrollbar-track-neutral-900" {...props}>
+        <span className="dark:bg-neutral-900 bg-neutral-300 bg-opacity-50 dark:text-slate-300 text-neutral-900 pt-0.5 my-0.5 px-2 mx-1 rounded-lg text-sm inline-flex max-w-[600px] overflow-x-auto scrollbar-thin scrollbar-thumb-neutral-600 scrollbar-track-neutral-900" {...props}>
           <code className="font-mono">{children}</code>
-        </pre>
+        </span>
       ) : (
         <code className={`inline-block bg-neutral-600 px-1.5 py-0.5 rounded-md text-sm font-mono whitespace-pre-wrap overflow-wrap-break-word ${className || ''}`} {...props}>
           {children}
@@ -179,16 +204,38 @@ export function Message({ content, isUser, timestamp, status, isComplete }: Mess
             ' text-neutral-900'
           )
         )}>
-          <div className="break-words markdown-body leading-relaxed">
-            {isUser ? (
-              content
-            ) : (
-              <Markdown
-              children={content}
-              remarkPlugins={[remarkGfm]}
-              components={markdownComponents}
-            />
+          {/* Streaming viewport container */}
+          <div 
+            className={cn(
+              "relative transition-all duration-100 linear",
+              isStreaming && "overflow-hidden"
             )}
+            style={{
+              height: isStreaming && containerHeight ? `${containerHeight}px` : 'auto'
+            }}
+          >
+            <div 
+              ref={contentRef}
+              className="break-words markdown-body leading-relaxed"
+            >
+              {isUser ? (
+                content
+              ) : (
+                <Markdown
+                  children={displayedContent || content}
+                  remarkPlugins={[remarkGfm]}
+                  components={markdownComponents}
+                />
+              )}
+              {/* Streaming cursor indicator */}
+              {isStreaming && !isUser && (
+                // fade out effect 
+                <>
+                <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t h-28 from-neutral-800 to-transparent " />
+                <span className="inline-block w-2 h-4 bg-neutral-500 dark:bg-neutral-400 ml-1 animate-pulse" />
+                </>
+              )}
+            </div>
           </div>
         </div>
 

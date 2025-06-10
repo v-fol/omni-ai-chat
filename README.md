@@ -10,7 +10,7 @@ Submission for the t3 chat cloneathon [https://cloneathon.t3.chat/](https://clon
 - [X] Message streaming
 - [X] Markdown support
 - [X] Ability to move input area to bottom/top/right of the screen
-- [ ] Auto scroll / scroll to bottom on new message / no auto scroll toggle
+- [X] Auto scroll / scroll to bottom on new message / no auto scroll toggle
 - [X] Chat navigation through conversation topics minimized to a sidebar
 - [ ] Audio input
 - [ ] Audio output
