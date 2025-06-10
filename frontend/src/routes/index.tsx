@@ -8,6 +8,7 @@ import { chatPositionAtom, isAutoScrollAtom, isLoadingAtom } from '@/lib/atoms';
 import { useState } from 'react';
 import { LayoutGrid, ArrowDown, Sun, Moon } from 'lucide-react';
 import { useCreateChat } from '@/lib/queries';
+import { Switch } from '@/components/ui/switch';
 
 const layoutConfig = {
   bottom: { inputWrapperClass: 'pl-0 pb-1 pt-2 pr-4', controlsWrapperClass: 'flex flex-col items-center gap-2 p-2', inputRows: 3, inputHeight: '' },
@@ -69,10 +70,13 @@ function NewChatComponent() {
         <TooltipTrigger asChild><Button variant="outline" size="icon" onClick={handlePositionChange} className="rounded-full size-6"><LayoutGrid className="w-3 h-3" /></Button></TooltipTrigger>
         <TooltipContent>Move input area</TooltipContent>
       </Tooltip>
-      <Tooltip>
-        <TooltipTrigger asChild><Button variant="outline" size="icon" onClick={() => setIsAutoScroll(!isAutoScroll)} className={cn("rounded-full size-6", isAutoScroll && "bg-accent-blue/10 text-accent-blue")}><ArrowDown className="w-3 h-3" /></Button></TooltipTrigger>
-        <TooltipContent>{isAutoScroll ? "Disable auto-scroll" : "Enable auto-scroll"}</TooltipContent>
-      </Tooltip>
+      <div className="flex items-center gap-2">
+        <Switch
+          checked={isAutoScroll}
+          onCheckedChange={setIsAutoScroll}
+        />
+        <span className="text-sm text-neutral-600 dark:text-neutral-400">Auto-scroll</span>
+      </div>
       <Tooltip>
         <TooltipTrigger asChild><Button variant="outline" size="icon" onClick={toggleTheme} className="rounded-full size-6">{theme === 'dark' ? <Sun className="w-3 h-3" /> : <Moon className="w-3 h-3" />}</Button></TooltipTrigger>
         <TooltipContent>{theme === 'dark' ? "Light mode" : "Dark mode"}</TooltipContent>

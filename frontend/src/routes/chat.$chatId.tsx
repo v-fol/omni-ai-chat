@@ -14,6 +14,7 @@ import { Message } from '@/components/chat/Message';
 import { useChat } from '@/lib/queries';
 import remarkGfm from 'remark-gfm';
 import Markdown from 'react-markdown';
+import { Switch } from '@/components/ui/switch';
 
 const layoutConfig = {
   bottom: {
@@ -65,9 +66,12 @@ function ChatComponent() {
   
   const [inputValue, setInputValue] = useState('');
   const [spacerHeight, setSpacerHeight] = useState(0);
+  const [userScrolledManually, setUserScrolledManually] = useState(false);
+  const [shouldMonitorScrolls, setShouldMonitorScrolls] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const lastMessageRef = useRef<HTMLDivElement | null>(null);
+  const autoScrollTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     if (chatData) {
@@ -88,6 +92,10 @@ function ChatComponent() {
   useEffect(() => {
     const lastMessage = messages.at(-1);
     if (lastMessage?.isUser) {
+      // Reset manual scroll flag for new conversation and disable scroll monitoring temporarily
+      setUserScrolledManually(false);
+      setShouldMonitorScrolls(false);
+      
       // Scroll user message to top
       const scrollViewport = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
       if (scrollViewport) {
@@ -101,65 +109,108 @@ function ChatComponent() {
           const userMessageElement = messageElements[messageElements.length - 1] as HTMLElement;
           if (userMessageElement) {
             userMessageElement.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            
+            // Enable scroll monitoring after our programmatic scroll settles
+            setTimeout(() => {
+              setShouldMonitorScrolls(true);
+            }, 500);
           }
         }, 50);
       }
     }
   }, [messages.filter(m => m.isUser).length]); // Only trigger on new user messages
 
-  // Effect 2: Handle AI message streaming and spacer management
+  // Smart scroll detection - only monitor during AI response streaming
+  useEffect(() => {
+    const scrollViewport = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
+    if (!scrollViewport) return;
+
+    const handleScroll = () => {
+      // Only monitor scrolls when we're supposed to (during AI streaming)
+      if (!shouldMonitorScrolls) return;
+      
+      // Clear any pending auto-scroll timeout
+      if (autoScrollTimeoutRef.current) {
+        clearTimeout(autoScrollTimeoutRef.current);
+        autoScrollTimeoutRef.current = null;
+      }
+
+      const { scrollTop, scrollHeight, clientHeight } = scrollViewport;
+      const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
+      
+      // If user is more than 200px from bottom, consider it manual scroll
+      if (distanceFromBottom > 200) {
+        setUserScrolledManually(true);
+      }
+    };
+
+    scrollViewport.addEventListener('scroll', handleScroll, { passive: true });
+    
+    return () => {
+      scrollViewport.removeEventListener('scroll', handleScroll);
+      if (autoScrollTimeoutRef.current) {
+        clearTimeout(autoScrollTimeoutRef.current);
+      }
+    };
+  }, [shouldMonitorScrolls]);
+
+  // Effect 2: Handle AI message streaming and auto-scroll
   useEffect(() => {
     const lastMessage = messages.at(-1);
     if (lastMessage && !lastMessage.isUser && lastMessage.status === 'streaming') {
       const scrollViewport = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
-      if (scrollViewport && spacerHeight > 0) {
-        const messageElements = scrollViewport.querySelectorAll('.message-item');
-        const aiMessageElement = messageElements[messageElements.length - 1] as HTMLElement;
+      if (!scrollViewport) return;
+
+      const messageElements = scrollViewport.querySelectorAll('.message-item');
+      const aiMessageElement = messageElements[messageElements.length - 1] as HTMLElement;
+      
+      if (!aiMessageElement) return;
+
+      // Check if answer is short to prevent UI jitter
+      const isShortAnswer = aiMessageElement.offsetHeight < 150;
+      
+      // Remove spacer when AI message gets long enough or reaches viewport edge
+      if (spacerHeight > 0) {
+        const aiMessageRect = aiMessageElement.getBoundingClientRect();
+        const viewportRect = scrollViewport.getBoundingClientRect();
         
-        if (aiMessageElement) {
-          const aiMessageRect = aiMessageElement.getBoundingClientRect();
-          const viewportRect = scrollViewport.getBoundingClientRect();
-          const aiMessageBottom = aiMessageRect.bottom;
-          const viewportBottom = viewportRect.bottom;
-          
-          // If AI message is approaching the bottom of viewport, remove spacer
-          if (aiMessageBottom >= viewportBottom - 100) { // 100px threshold
-            setSpacerHeight(0);
-            
-            // If auto-scroll is enabled, start following the AI response
-            if (isAutoScroll) {
-              setTimeout(() => {
-                scrollViewport.scrollTo({ 
-                  top: scrollViewport.scrollHeight, 
-                  behavior: 'smooth' 
-                });
-              }, 100);
-            }
-          }
+        if (aiMessageRect.bottom >= viewportRect.bottom - 100) {
+          setSpacerHeight(0);
         }
       }
-    }
-  }, [messages, spacerHeight, isAutoScroll]);
-
-  // Effect 3: Continue auto-scrolling during AI response (only if auto-scroll enabled and spacer removed)
-  useEffect(() => {
-    const lastMessage = messages.at(-1);
-    if (isAutoScroll && lastMessage && !lastMessage.isUser && lastMessage.status === 'streaming' && spacerHeight === 0) {
-      const scrollViewport = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
-      if (scrollViewport) {
-        scrollViewport.scrollTo({ 
-          top: scrollViewport.scrollHeight, 
-          behavior: 'smooth' 
-        });
+      
+      // Auto-scroll logic: only if enabled, user hasn't scrolled away, and answer is long enough
+      if (isAutoScroll && !userScrolledManually && !isShortAnswer && spacerHeight === 0) {
+        // Clear any pending timeout
+        if (autoScrollTimeoutRef.current) {
+          clearTimeout(autoScrollTimeoutRef.current);
+        }
+        
+        // Debounce auto-scroll to prevent conflicts
+        autoScrollTimeoutRef.current = setTimeout(() => {
+          scrollViewport.scrollTo({ 
+            top: scrollViewport.scrollHeight, 
+            behavior: 'auto' 
+          });
+        }, 50);
       }
     }
-  }, [messages, isAutoScroll, spacerHeight]);
+  }, [messages, spacerHeight, isAutoScroll, userScrolledManually]);
 
-  // Effect 4: Clean up when message is complete
+  // Effect 3: Clean up when message is complete
   useEffect(() => {
     const lastMessage = messages.at(-1);
     if (lastMessage && !lastMessage.isUser && lastMessage.status === 'complete') {
       setSpacerHeight(0); // Ensure spacer is removed
+      // Reset flags for next conversation
+      setUserScrolledManually(false);
+      setShouldMonitorScrolls(false);
+      
+      // Clear any pending auto-scroll
+      if (autoScrollTimeoutRef.current) {
+        clearTimeout(autoScrollTimeoutRef.current);
+        autoScrollTimeoutRef.current = null;
+      }
     }
   }, [messages.map(m => m.status).join(',')]); // Trigger when any message status changes
 
@@ -202,20 +253,21 @@ function ChatComponent() {
     };
     setMessages(prev => [...prev, optimisticMessage]);
     setIsLoading(true); // Start loading for AI response
+    setInputValue(''); // Clear input immediately
 
-    // Send the message via WebSocket
-    const success = sendMessage(wsRef.current, messageText);
-    
-    if (success) {
-      setInputValue('');
-    } else {
-      // If sending fails, revert the optimistic updates
-      console.error("Failed to send message via WebSocket. Reverting UI updates.");
-      setMessages(prev => prev.slice(0, -1)); // Remove optimistic message
-      setIsLoading(false);
-      setSpacerHeight(0);
-      alert("Failed to send message. Please check your connection.");
-    }
+    // Add 2-second delay before sending to backend to allow scroll effects to complete
+    setTimeout(() => {
+      const success = sendMessage(wsRef.current, messageText);
+      
+      if (!success) {
+        // If sending fails, revert the optimistic updates
+        console.error("Failed to send message via WebSocket. Reverting UI updates.");
+        setMessages(prev => prev.slice(0, -1)); // Remove optimistic message
+        setIsLoading(false);
+        setSpacerHeight(0);
+        alert("Failed to send message. Please check your connection.");
+      }
+    }, 1000); // 1-second delay
   };
 
   const handleWebSocketMessage = (text: string) => {
@@ -272,14 +324,15 @@ function ChatComponent() {
         </TooltipTrigger>
         <TooltipContent>Move input area</TooltipContent>
       </Tooltip>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <Button variant="outline" size="icon" onClick={() => setIsAutoScroll(!isAutoScroll)} className={cn("rounded-full size-6", isAutoScroll && "bg-accent-blue/10 text-accent-blue")}>
-            <ArrowDown className="w-3 h-3" />
-          </Button>
-        </TooltipTrigger>
-        <TooltipContent>{isAutoScroll ? "Disable auto-scroll" : "Enable auto-scroll"}</TooltipContent>
-      </Tooltip>
+      
+      <div className="flex items-center gap-2">
+        <Switch
+          checked={isAutoScroll}
+          onCheckedChange={setIsAutoScroll}
+        />
+        <span className="text-sm text-neutral-600 dark:text-neutral-400">Auto-scroll</span>
+      </div>
+
       <Tooltip>
         <TooltipTrigger asChild>
           <Button variant="outline" size="icon" onClick={toggleTheme} className="rounded-full size-6">

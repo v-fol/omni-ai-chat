@@ -150,7 +150,7 @@ export function ChatList() {
       {isLoadingChats ? (
         <div>Loading chats...</div>
       ) : (
-        <div className="space-y-2 overflow-y-auto">
+        <div className="space-y-2 overflow-y-auto max-h-[calc(100vh-10rem)]">
           <TimeSection title="Today" chats={groupedChats.today} />
           <TimeSection title="Yesterday" chats={groupedChats.yesterday} />
           <TimeSection title="Last 7 Days" chats={groupedChats.lastWeek} />
