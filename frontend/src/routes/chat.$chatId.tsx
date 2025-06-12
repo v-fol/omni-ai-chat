@@ -8,7 +8,7 @@ import { useTheme } from '@/lib/theme-context';
 import { chatPositionAtom, isAutoScrollAtom, chatMessagesAtom, isLoadingAtom, userAtom, sidebarCollapsedAtom } from '@/lib/atoms';
 import type { Message as MessageType } from '@/lib/atoms';
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
-import { connectWebSocket, sendMessage, closeWebSocket } from '@/lib/websocket';
+import { ChatEventSource, sendChatMessage } from '@/lib/eventsource';
 import { LayoutGrid, ArrowDown, Sun, Moon, Clock, User, Bot, Hash } from 'lucide-react';
 import { Message } from '@/components/chat/Message';
 import { useChat } from '@/lib/queries';
@@ -68,7 +68,7 @@ function ChatComponent() {
   const [spacerHeight, setSpacerHeight] = useState(0);
   const [userScrolledManually, setUserScrolledManually] = useState(false);
   const [shouldMonitorScrolls, setShouldMonitorScrolls] = useState(false);
-  const wsRef = useRef<WebSocket | null>(null);
+  const sseRef = useRef<ChatEventSource | null>(null);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const lastMessageRef = useRef<HTMLDivElement | null>(null);
   const autoScrollTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -118,7 +118,7 @@ function ChatComponent() {
         }, 50);
       }
     }
-  }, [messages.filter(m => m.isUser).length]); // Only trigger on new user messages
+  }, [messages.filter(m => m.isUser).length]);
 
   // Smart scroll detection - only monitor during AI response streaming
   useEffect(() => {
@@ -230,38 +230,53 @@ function ChatComponent() {
     }
   }, [chatId, messages.length]); // Only trigger on chat switch or initial message load
 
+  // SSE Connection management
   useEffect(() => {
     if (!chatId || !user) return;
 
-    const onOpen = () => {
-      const kickOffMessage = location.state?.firstMessage;
-      if (kickOffMessage) {
-        sendMessage(wsRef.current, kickOffMessage);
-        window.history.replaceState({ ...window.history.state, firstMessage: undefined }, '');
+    // Create SSE connection with Redis Streams support
+    const sse = new ChatEventSource(chatId, {
+      onChunk: handleSSEChunk,
+      onComplete: handleSSEComplete,
+      onError: handleSSEError,
+      onStart: handleSSEStart,
+      onConnected: (consumer: string) => {
+        console.log('SSE connected to Redis Stream for chat', chatId, 'with consumer:', consumer);
+        
+        // Send initial message if coming from new chat creation
+        const kickOffMessage = location.state?.firstMessage;
+        if (kickOffMessage) {
+          console.log('Sending initial message via SSE');
+          handleSendMessage(kickOffMessage);
+          
+          // Clear the state so we don't send it again
+          window.history.replaceState({ ...window.history.state, firstMessage: undefined }, '');
+        }
+      },
+      onHeartbeat: (lastId?: string) => {
+        // Optionally handle heartbeats - Redis Streams keeps track of last processed message
+        if (lastId) {
+          console.debug('Heartbeat received, last processed message ID:', lastId);
+        }
       }
-    };
+    });
 
-    const ws = connectWebSocket(
-      `ws://localhost:8000/chat/${chatId}/ws`,
-      handleWebSocketMessage,
-      handleWebSocketError,
-      onOpen
-    );
-    wsRef.current = ws;
+    sse.connect();
+    sseRef.current = sse;
 
     return () => {
-      closeWebSocket(ws);
-      wsRef.current = null;
+      sse.disconnect();
+      sseRef.current = null;
     };
   }, [chatId, user]);
-  
-  const handleSendMessage = async () => {
-    if (!inputValue.trim() || isLoading) return;
-    const messageText = inputValue.trim();
+
+  const handleSendMessage = async (messageText?: string) => {
+    const textToSend = messageText || inputValue.trim();
+    if (!textToSend || isLoading) return;
 
     // Optimistically add the user's message to the UI
     const optimisticMessage: MessageType = {
-      content: messageText,
+      content: textToSend,
       isUser: true,
       timestamp: new Date(),
       status: 'complete',
@@ -269,44 +284,81 @@ function ChatComponent() {
     };
     setMessages(prev => [...prev, optimisticMessage]);
     setIsLoading(true); // Start loading for AI response
-    setInputValue(''); // Clear input immediately
+    if (!messageText) setInputValue(''); // Clear input immediately only if not from initial message
 
-    // Add 2-second delay before sending to backend to allow scroll effects to complete
-    setTimeout(() => {
-      const success = sendMessage(wsRef.current, messageText);
-      
-      if (!success) {
-        // If sending fails, revert the optimistic updates
-        console.error("Failed to send message via WebSocket. Reverting UI updates.");
-        setMessages(prev => prev.slice(0, -1)); // Remove optimistic message
-        setIsLoading(false);
-        setSpacerHeight(0);
-        alert("Failed to send message. Please check your connection.");
-      }
-    }, 1000); // 1-second delay
-  };
-
-  const handleWebSocketMessage = (text: string) => {
-    if (text === '[DONE]') {
+    // Send message via HTTP API
+    const result = await sendChatMessage(chatId, textToSend);
+    
+    if (!result.success) {
+      console.error("Failed to send message:", result.error);
+      // Revert optimistic updates
+      setMessages(prev => prev.slice(0, -1));
       setIsLoading(false);
       setSpacerHeight(0);
-      setMessages(prev => prev.map((m, i) => i === prev.length - 1 ? { ...m, status: 'complete', isComplete: true } : m));
+      alert(`Failed to send message: ${result.error}`);
     } else {
-      setMessages(prev => {
-        const lastMessage = prev[prev.length - 1];
-        if (lastMessage && !lastMessage.isUser) {
-          return [...prev.slice(0, -1), { ...lastMessage, content: lastMessage.content + text }];
-        }
-        return [...prev, { content: text, isUser: false, timestamp: new Date(), status: 'streaming' }];
-      });
+      console.log(`Message sent successfully, task ID: ${result.taskId}`);
     }
   };
 
-  const handleWebSocketError = (error: Error) => {
-    console.error('WebSocket error:', error);
+  const handleSSEStart = (messageId: string) => {
+    console.log('AI response started, message ID:', messageId);
+    // Create placeholder for AI message
+    const aiMessage: MessageType = {
+      content: '',
+      isUser: false,
+      timestamp: new Date(),
+      status: 'streaming',
+      isComplete: false
+    };
+    setMessages(prev => [...prev, aiMessage]);
+  };
+
+  const handleSSEChunk = (text: string, sequence?: number) => {
+    setMessages(prev => {
+      const lastMessage = prev[prev.length - 1];
+      if (lastMessage && !lastMessage.isUser && lastMessage.status === 'streaming') {
+        return [...prev.slice(0, -1), { 
+          ...lastMessage, 
+          content: lastMessage.content + text,
+          status: 'streaming'
+        }];
+      }
+      // If no streaming message exists, create one (fallback)
+      return [...prev, { 
+        content: text, 
+        isUser: false, 
+        timestamp: new Date(), 
+        status: 'streaming',
+        isComplete: false
+      }];
+    });
+  };
+
+  const handleSSEComplete = (messageId: string, totalChunks?: number) => {
+    console.log('Message generation complete:', messageId, 'Total chunks:', totalChunks);
     setIsLoading(false);
     setSpacerHeight(0);
-    setMessages(prev => prev.map((m, i) => i === prev.length - 1 ? { ...m, status: 'incomplete' } : m));
+    setMessages(prev => prev.map((m, i) => 
+      i === prev.length - 1 ? { 
+        ...m, 
+        status: 'complete', 
+        isComplete: true 
+      } : m
+    ));
+  };
+
+  const handleSSEError = (error: string) => {
+    console.error('SSE error:', error);
+    setIsLoading(false);
+    setSpacerHeight(0);
+    setMessages(prev => prev.map((m, i) => 
+      i === prev.length - 1 ? { 
+        ...m, 
+        status: 'incomplete',
+        isComplete: false
+      } : m
+    ));
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -476,80 +528,63 @@ function ChatComponent() {
       setHoverPosition(null);
     }, []);
 
+    const hoveredConversation = hoveredItem ? navigationItems.find(item => item.id === hoveredItem) : null;
+
     return (
-      <div className={cn(
-        "border-t p-3 relative",
-        theme === 'dark' ? 'border-border-dark bg-neutral-900/50' : 'border-border-light bg-neutral-100/50'
-      )}>
-        <div className="flex items-center gap-2 mb-3">
-          <Hash className="w-4 h-4 text-neutral-500" />
-          <span className="text-sm font-medium text-neutral-600 dark:text-neutral-400">
-            Conversation Topics
-          </span>
-        </div>
-        
-        {/* Quick scroll buttons */}
-        <div className="flex gap-1 mb-3">
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={scrollToTop}
-            className="h-6 px-2 text-xs flex items-center gap-1"
-          >
-            <ArrowDown className="w-3 h-3 rotate-180" />
-            Top
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={scrollToBottom}
-            className="h-6 px-2 text-xs flex items-center gap-1"
-          >
-            <ArrowDown className="w-3 h-3" />
-            Bottom
-          </Button>
+      <div className="h-full flex flex-col">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-medium text-neutral-600 dark:text-neutral-400">Navigation</h3>
+          <div className="flex gap-1">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="ghost" size="icon" onClick={scrollToTop} className="size-5">
+                  <ArrowDown className="w-3 h-3 rotate-180" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Go to top</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="ghost" size="icon" onClick={scrollToBottom} className="size-5">
+                  <ArrowDown className="w-3 h-3" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Go to bottom</TooltipContent>
+            </Tooltip>
+          </div>
         </div>
 
-        {/* Scrollable navigation items */}
-        <div className="flex-1">
-          <div className=" max-h-[50vh] overflow-y-auto space-y-1 scrollbar-thin scrollbar-thumb-neutral-400 dark:scrollbar-thumb-neutral-600 scrollbar-track-transparent">
-            {/* Navigation items */}
+        <div className="flex-1 overflow-y-auto space-y-1">
+          <div className="space-y-1">
             {navigationItems.map((item) => (
               <div
                 key={item.id}
-                className="relative"
+                className={cn(
+                  "p-2 rounded-md cursor-pointer transition-colors border-l-2 border-transparent",
+                  "hover:bg-neutral-100 dark:hover:bg-neutral-700",
+                  "hover:border-l-blue-500"
+                )}
                 onMouseEnter={(e) => handleMouseEnter(item.id, e)}
                 onMouseLeave={handleMouseLeave}
+                onClick={() => scrollToMessage(item.messageIndex)}
               >
-                <button
-                  onClick={() => {
-                      scrollToMessage(item.messageIndex);
-                      setHoveredItem(null);
-                      setHoverPosition(null);
-                  }}
-                  className={cn(
-                    "w-full text-left p-2 rounded-md transition-colors flex items-center gap-2",
-                    "hover:bg-neutral-200 dark:hover:bg-neutral-800",
-                    theme === 'dark' 
-                      ? 'text-neutral-300 hover:text-neutral-100  bg-neutral-900' 
-                      : 'text-neutral-600 hover:text-neutral-900  bg-neutral-100',
-                  )}
-                >
-                    <div className="space-y-1">
-                      <div className="flex items-start gap-1">
-                        <User className="w-3 h-3 text-blue-500 mt-0.5 flex-shrink-0" />
-                        <span className="text-xs text-blue-600 dark:text-blue-400 leading-tight">
-                          {item.question}
-                        </span>
-                      </div>
-                      <div className="flex items-start gap-1">
-                        <Bot className="w-3 h-3 text-green-500 mt-0.5 flex-shrink-0" />
-                        <span className="text-xs text-green-600 dark:text-green-400 leading-tight">
-                          {item.answer}
-                        </span>
-                      </div>
-                    </div>
-                </button>
+                <div className="space-y-1">
+                  <div className="flex items-center gap-1 text-xs text-neutral-500">
+                    <User className="w-3 h-3" />
+                    <span className="font-mono">
+                      {item.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                  </div>
+                  <div className="text-xs font-medium text-neutral-800 dark:text-neutral-200 line-clamp-2">
+                    {item.question}
+                  </div>
+                  <div className="flex items-center gap-1 text-xs text-neutral-500">
+                    <Bot className="w-3 h-3" />
+                  </div>
+                  <div className="text-xs text-neutral-600 dark:text-neutral-400 line-clamp-2">
+                    {item.answer}
+                  </div>
+                </div>
               </div>
             ))}
           </div>
@@ -564,7 +599,7 @@ function ChatComponent() {
         )}
 
         {/* Hover preview - positioned outside scroll container */}
-        {hoveredItem && hoverPosition && (
+        {hoveredItem && hoverPosition && hoveredConversation && (
           <div
             className={cn(
               "fixed z-50 w-[28rem] p-3 rounded-lg shadow-lg border",
@@ -579,34 +614,29 @@ function ChatComponent() {
               transform: 'translateY(-50%)'
             }}
           >
-            {(() => {
-              const item = navigationItems.find(item => item.id === hoveredItem);
-              if (!item || item.type !== 'conversation') return null;
+            <div className="space-y-2">
+              <div className="flex items-center gap-2">
+                <User className="w-4 h-4 text-blue-500" />
+                <span className="text-sm font-medium">Question</span>
+              </div>
+              <div className="text-sm text-neutral-700 dark:text-neutral-300 pl-6">
+                {hoveredConversation.questionFull}
+              </div>
               
-              return (
-                <div className="space-y-3 ">
-                  <div>
-                    <div className="flex items-center gap-2 mb-1">
-                      <User className="w-3 h-3 text-blue-500" />
-                      <span className="text-xs font-medium text-blue-600 dark:text-blue-400">Question</span>
-                    </div>
-                    <p className="text-xs leading-relaxed pl-5">{item.questionFull}</p>
-                  </div>
-                  <div className="overflow-y-hidden">
-                    <div className="flex items-center gap-2 mb-1">
-                      <Bot className="w-3 h-3 text-green-500" />
-                      <span className="text-xs font-medium text-green-600 dark:text-green-400">Answer</span>
-                    </div>
-                    <div className="text-xs leading-relaxed pl-5 prose prose-xs max-w-none dark:prose-invert overflow-hidden overflow-y-hidden">
-                      <Markdown remarkPlugins={[remarkGfm]}>
-                        {item.answerFull.slice(0, 1000)}
-                      </Markdown>
-                        <div className="absolute bottom-0 left-0 right-0 h-16 bg-gradient-to-t dark:from-neutral-800 from-white to-transparent pointer-events-none" />
-                    </div>
-                  </div>
-                </div>
-              );
-            })()}
+              <div className="flex items-center gap-2 pt-2">
+                <Bot className="w-4 h-4 text-green-500" />
+                <span className="text-sm font-medium">Answer</span>
+              </div>
+              <div className="text-sm text-neutral-700 dark:text-neutral-300 pl-6">
+                <Markdown
+                  children={hoveredConversation.answerFull.length > 200 
+                    ? hoveredConversation.answerFull.substring(0, 200) + '...' 
+                    : hoveredConversation.answerFull
+                  }
+                  remarkPlugins={[remarkGfm]}
+                />
+              </div>
+            </div>
           </div>
         )}
       </div>
