@@ -5,17 +5,18 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
 import { useTheme } from '@/lib/theme-context';
-import { chatPositionAtom, isAutoScrollAtom, chatMessagesAtom, isLoadingAtom, userAtom, sidebarCollapsedAtom } from '@/lib/atoms';
+import { chatPositionAtom, isAutoScrollAtom, chatMessagesAtom, isLoadingAtom, userAtom, sidebarCollapsedAtom, searchEnabledAtom, selectedModelAtom } from '@/lib/atoms';
 import type { Message as MessageType } from '@/lib/atoms';
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { ChatEventSource, sendChatMessage } from '@/lib/eventsource';
-import { LayoutGrid, ArrowDown, Sun, Moon, Clock, User, Bot, Hash } from 'lucide-react';
+import { LayoutGrid, ArrowDown, Sun, Moon, Clock, User, Bot, Hash, Search } from 'lucide-react';
 import { Message } from '@/components/chat/Message';
 import { useChat } from '@/lib/queries';
 import remarkGfm from 'remark-gfm';
 import Markdown from 'react-markdown';
 import { Switch } from '@/components/ui/switch';
-import { VoiceRecordButton } from '@/components/ui/VoiceRecordButton';
+import { VoiceRecordButton } from '@/components/chat/VoiceRecordButton';
+import { ModelSelector } from '@/components/chat/ModelSelector';
 
 const layoutConfig = {
   bottom: {
@@ -63,6 +64,8 @@ function ChatComponent() {
   const [isLoading, setIsLoading] = useAtom(isLoadingAtom);
   const [user] = useAtom(userAtom);
   const [sidebarCollapsed, setSidebarCollapsed] = useAtom(sidebarCollapsedAtom);
+  const [searchEnabled, setSearchEnabled] = useAtom(searchEnabledAtom);
+  const [selectedModel] = useAtom(selectedModelAtom);
   const { data: chatData } = useChat(chatId);
   
   const [inputValue, setInputValue] = useState('');
@@ -83,7 +86,34 @@ function ChatComponent() {
         status: msg.status,
         isComplete: msg.is_complete,
       }));
-      setMessages(loadedMessages);
+      
+      // Merge with existing messages to avoid overwriting optimistic updates
+      setMessages(prev => {
+        console.log('🔄 Merging messages:', { 
+          prevLength: prev.length, 
+          loadedLength: loadedMessages.length,
+          hasOptimistic: prev.some(m => m.tempId)
+        });
+        
+        // If we have no previous messages, just use the loaded ones
+        if (prev.length === 0) {
+          console.log('📥 No previous messages, using loaded messages');
+          return loadedMessages;
+        }
+        
+        // If loaded messages are the same length or longer, use them (database is authoritative)
+        if (loadedMessages.length >= prev.length) {
+          console.log('📊 Database has same or more messages, using database as source of truth');
+          // Clean up any tempId properties from database messages
+          return loadedMessages.map((msg: MessageType) => ({ ...msg, tempId: undefined }));
+        }
+        
+        // If we have more messages in UI than in database (optimistic updates),
+        // keep only the optimistic messages (those with tempId) that aren't in the database yet
+        const optimisticMessages = prev.slice(loadedMessages.length).filter(msg => msg.tempId);
+        console.log('🚀 Preserving optimistic messages:', optimisticMessages.length);
+        return [...loadedMessages.map((msg: MessageType) => ({ ...msg, tempId: undefined })), ...optimisticMessages];
+      });
     } else {
       setMessages([]);
     }
@@ -246,8 +276,9 @@ function ChatComponent() {
         
         // Send initial message if coming from new chat creation
         const kickOffMessage = location.state?.firstMessage;
+        
         if (kickOffMessage) {
-          console.log('Sending initial message via SSE');
+          console.log('Sending initial message via SSE with search:', searchEnabled);
           handleSendMessage(kickOffMessage);
           
           // Clear the state so we don't send it again
@@ -281,14 +312,21 @@ function ChatComponent() {
       isUser: true,
       timestamp: new Date(),
       status: 'complete',
-      isComplete: true
+      isComplete: true,
+      tempId: `temp-${Date.now()}` // Add temporary ID for tracking
     };
     setMessages(prev => [...prev, optimisticMessage]);
     setIsLoading(true); // Start loading for AI response
     if (!messageText) setInputValue(''); // Clear input immediately only if not from initial message
 
-    // Send message via HTTP API
-    const result = await sendChatMessage(chatId, textToSend);
+    // Send message via HTTP API with model and search options
+    const result = await sendChatMessage(
+      chatId, 
+      textToSend, 
+      searchEnabled && selectedModel.supports_search, // Only enable search if model supports it
+      selectedModel.id,
+      selectedModel.provider
+    );
     
     if (!result.success) {
       console.error("Failed to send message:", result.error);
@@ -298,7 +336,7 @@ function ChatComponent() {
       setSpacerHeight(0);
       alert(`Failed to send message: ${result.error}`);
     } else {
-      console.log(`Message sent successfully, task ID: ${result.taskId}`);
+      console.log(`Message sent successfully, task ID: ${result.taskId}, model: ${result.model}, provider: ${result.provider}`);
     }
   };
 
@@ -399,6 +437,34 @@ function ChatComponent() {
         <TooltipContent>Move input area</TooltipContent>
       </Tooltip>
       
+      <ModelSelector className="rounded-full" />
+      
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button 
+            variant={searchEnabled ? "default" : "outline"} 
+            size="icon" 
+            onClick={() => setSearchEnabled(!searchEnabled)} 
+            disabled={!selectedModel.supports_search}
+            className={cn(
+              "rounded-full size-6",
+              searchEnabled && "bg-blue-600 hover:bg-blue-700 text-white",
+              !selectedModel.supports_search && "opacity-50 cursor-not-allowed"
+            )}
+          >
+            <Search className="w-3 h-3" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>
+          {!selectedModel.supports_search 
+            ? "Search not supported by this model" 
+            : searchEnabled 
+              ? "Disable Google Search" 
+              : "Enable Google Search"
+          }
+        </TooltipContent>
+      </Tooltip>
+      
       <div className="flex items-center gap-2">
         <Switch
           checked={isAutoScroll}
@@ -424,15 +490,22 @@ function ChatComponent() {
         className={cn(
           "w-full p-2 pr-12 rounded-md resize-none border focus:outline-none focus:ring-2 focus:ring-accent-blue/50",
           config.inputHeight,
+          searchEnabled && "border-blue-500 bg-blue-50/50 dark:bg-blue-950/20",
           theme === 'dark' ? 'bg-background-dark-secondary text-text-light-primary border-border-dark' : 'bg-background-secondary text-text-primary border-border-light'
         )}
         rows={config.inputRows}
-        placeholder="Type your message..."
+        placeholder={searchEnabled ? "Type your message... (Google Search enabled)" : "Type your message..."}
         value={inputValue}
         onChange={(e) => setInputValue(e.target.value)}
         onKeyDown={handleKeyDown}
         disabled={isLoading}
       />
+      {searchEnabled && (
+        <div className="absolute left-2 top-2 flex items-center gap-1 text-xs text-blue-600 dark:text-blue-400">
+          <Search className="w-3 h-3" />
+          <span className="font-medium">Search</span>
+        </div>
+      )}
       <div className="absolute right-2 top-2">
         <VoiceRecordButton
           onTranscriptionComplete={handleVoiceTranscription}

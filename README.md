@@ -13,12 +13,13 @@ Submission for the t3 chat cloneathon [https://cloneathon.t3.chat/](https://clon
 - [X] Auto scroll / scroll to bottom on new message / no auto scroll toggle
 - [X] Chat navigation through conversation topics minimized to a sidebar
 - [X] Voice input
-- [ ] Audio output
-- [ ] Goolge search functionality
-- [ ] Image input
+- [X] Goolge search functionality
+- [X] Preserve chat context/history
 - [ ] Image output
 - [ ] File input
-- [ ] Multiple AI models
+- [X] Multiple AI models
+- [ ] Audio output
+- [ ] Token count
 
 #### 2. User management
 
