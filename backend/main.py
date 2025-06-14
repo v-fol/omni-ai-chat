@@ -22,7 +22,7 @@ import time
 import httpx
 
 from db.engine import User, Chat, Message, init as init_db
-from tasks import generate_ai_response
+from tasks import generate_ai_response, generate_openrouter_response, generate_github_response
 
 # Load environment variables
 load_dotenv()
@@ -98,6 +98,9 @@ class CreateChatRequest(BaseModel):
 
 class SendMessageRequest(BaseModel):
     message: str
+    enable_search: bool = False
+    model: str = "gemini-2.0-flash"  # Default to Gemini
+    provider: str = "google"  # Default to Google
 
 class VoiceTranscriptionRequest(BaseModel):
     audio_data: str  # Base64 encoded audio data
@@ -286,6 +289,7 @@ async def delete_chat(chat_id: str, request: Request):
 async def send_message_to_chat(chat_id: str, request: Request, body: SendMessageRequest):
     """
     Send a new message to the chat and trigger AI response generation via Celery.
+    Routes to appropriate task based on model provider.
     Returns immediately after enqueuing the task.
     """
     user = await get_current_user(request)
@@ -307,16 +311,48 @@ async def send_message_to_chat(chat_id: str, request: Request, body: SendMessage
     )
     await user_message.insert()
     
-    # Enqueue Celery task for AI response generation
-    task = generate_ai_response.delay(chat_id, body.message, user.email)
-    
-    print(f"Enqueued AI response task {task.id} for chat {chat_id}")
-    
-    return {
-        "message": "Message sent successfully",
-        "task_id": task.id,
-        "user_message_id": str(user_message.id)
-    }
+    # Route to appropriate task based on provider
+    if body.provider == "google":
+        # Enqueue Celery task for Gemini AI response generation with optional search
+        task = generate_ai_response.delay(chat_id, body.message, user.email, body.enable_search)
+        print(f"Enqueued Gemini AI response task {task.id} for chat {chat_id} (search: {body.enable_search})")
+        
+        return {
+            "message": "Message sent successfully",
+            "task_id": task.id,
+            "user_message_id": str(user_message.id),
+            "search_enabled": body.enable_search,
+            "model": body.model,
+            "provider": body.provider
+        }
+    elif body.provider == "openrouter":
+        # Enqueue Celery task for OpenRouter AI response generation
+        task = generate_openrouter_response.delay(chat_id, body.message, user.email, body.model)
+        print(f"Enqueued OpenRouter AI response task {task.id} for chat {chat_id} (model: {body.model})")
+        
+        return {
+            "message": "Message sent successfully",
+            "task_id": task.id,
+            "user_message_id": str(user_message.id),
+            "search_enabled": False,  # OpenRouter doesn't support search yet
+            "model": body.model,
+            "provider": body.provider
+        }
+    elif body.provider == "github":
+        # Enqueue Celery task for GitHub AI response generation
+        task = generate_github_response.delay(chat_id, body.message, user.email, body.model)
+        print(f"Enqueued GitHub AI response task {task.id} for chat {chat_id} (model: {body.model})")
+        
+        return {
+            "message": "Message sent successfully",
+            "task_id": task.id,
+            "user_message_id": str(user_message.id),
+            "search_enabled": False,  # GitHub doesn't support search
+            "model": body.model,
+            "provider": body.provider
+        }
+    else:
+        raise HTTPException(status_code=400, detail=f"Unsupported provider: {body.provider}")
 
 @app.get("/sse/chat/{chat_id}")
 async def stream_chat_messages(
@@ -480,6 +516,377 @@ async def get_available_models():
     for model in client.models.list():
         print(f"  Name: {model.name}")
     return {"models": [model.name for model in client.models.list()]}
+
+@app.get("/models/available")
+async def get_all_available_models():
+    """Get all available models from different providers"""
+    models = []
+    
+    # Google Gemini models
+    try:
+        gemini_models = [
+            {
+                "id": "gemini-2.0-flash",
+                "name": "Gemini 2.0 Flash",
+                "provider": "google",
+                "supports_search": True,
+                "description": "Google's latest multimodal AI model"
+            },
+            {
+                "id": "gemini-1.5-pro",
+                "name": "Gemini 1.5 Pro",
+                "provider": "google", 
+                "supports_search": True,
+                "description": "Google's advanced reasoning model"
+            }
+        ]
+        models.extend(gemini_models)
+    except Exception as e:
+        print(f"Error fetching Gemini models: {e}")
+    
+    # OpenRouter models (organized by category)
+    openrouter_models = [
+        # Latest & Most Capable Models
+        {
+            "id": "deepseek/deepseek-r1:free",
+            "name": "DeepSeek R1 (Free)",
+            "provider": "openrouter",
+            "supports_search": False,
+            "description": "Latest reasoning model from DeepSeek - 163K context"
+        },
+        {
+            "id": "deepseek/deepseek-chat:free",
+            "name": "DeepSeek V3 (Free)",
+            "provider": "openrouter",
+            "supports_search": False,
+            "description": "DeepSeek's most advanced chat model - 163K context"
+        },
+        {
+            "id": "google/gemini-2.5-pro-exp-03-25",
+            "name": "Gemini 2.5 Pro Experimental",
+            "provider": "openrouter",
+            "supports_search": False,
+            "description": "Google's experimental model via OpenRouter - 1M context"
+        },
+        {
+            "id": "google/gemini-2.0-flash-exp:free",
+            "name": "Gemini 2.0 Flash (Free)",
+            "provider": "openrouter",
+            "supports_search": False,
+            "description": "Google's latest model via OpenRouter - 1M context"
+        },
+        {
+            "id": "meta-llama/llama-4-maverick:free",
+            "name": "Llama 4 Maverick (Free)",
+            "provider": "openrouter",
+            "supports_search": False,
+            "description": "Meta's latest Llama 4 model - 128K context"
+        },
+        {
+            "id": "meta-llama/llama-4-scout:free",
+            "name": "Llama 4 Scout (Free)",
+            "provider": "openrouter",
+            "supports_search": False,
+            "description": "Meta's Llama 4 Scout model - 200K context"
+        },
+        
+        # High Performance Models
+        {
+            "id": "nvidia/llama-3.1-nemotron-ultra-253b-v1:free",
+            "name": "Llama 3.1 Nemotron Ultra 253B (Free)",
+            "provider": "openrouter",
+            "supports_search": False,
+            "description": "NVIDIA's ultra-large model - 131K context"
+        },
+        {
+            "id": "nvidia/llama-3.3-nemotron-super-49b-v1:free",
+            "name": "Llama 3.3 Nemotron Super 49B (Free)",
+            "provider": "openrouter",
+            "supports_search": False,
+            "description": "NVIDIA's super model - 131K context"
+        },
+        {
+            "id": "meta-llama/llama-3.3-70b-instruct:free",
+            "name": "Llama 3.3 70B Instruct (Free)",
+            "provider": "openrouter",
+            "supports_search": False,
+            "description": "Meta's latest 70B model - 131K context"
+        },
+        {
+            "id": "qwen/qwen3-235b-a22b:free",
+            "name": "Qwen3 235B A22B (Free)",
+            "provider": "openrouter",
+            "supports_search": False,
+            "description": "Qwen's largest model - 40K context"
+        },
+        
+        # Reasoning & Coding Models
+        {
+            "id": "qwen/qwq-32b:free",
+            "name": "QwQ 32B (Free)",
+            "provider": "openrouter",
+            "supports_search": False,
+            "description": "Qwen's reasoning model - 40K context"
+        },
+        {
+            "id": "deepseek/deepseek-prover-v2:free",
+            "name": "DeepSeek Prover V2 (Free)",
+            "provider": "openrouter",
+            "supports_search": False,
+            "description": "Mathematical reasoning and proof generation - 163K context"
+        },
+        {
+            "id": "qwen/qwen-2.5-coder-32b-instruct:free",
+            "name": "Qwen2.5 Coder 32B (Free)",
+            "provider": "openrouter",
+            "supports_search": False,
+            "description": "Specialized coding model - 32K context"
+        },
+        {
+            "id": "microsoft/phi-4-reasoning:free",
+            "name": "Phi 4 Reasoning (Free)",
+            "provider": "openrouter",
+            "supports_search": False,
+            "description": "Microsoft's reasoning model - 32K context"
+        },
+        {
+            "id": "mistralai/devstral-small:free",
+            "name": "Devstral Small (Free)",
+            "provider": "openrouter",
+            "supports_search": False,
+            "description": "Mistral's coding model - 131K context"
+        },
+        
+        # Vision Models
+        {
+            "id": "qwen/qwen2.5-vl-72b-instruct:free",
+            "name": "Qwen2.5 VL 72B (Free)",
+            "provider": "openrouter",
+            "supports_search": False,
+            "description": "Vision-language model - 131K context"
+        },
+        {
+            "id": "meta-llama/llama-3.2-11b-vision-instruct:free",
+            "name": "Llama 3.2 11B Vision (Free)",
+            "provider": "openrouter",
+            "supports_search": False,
+            "description": "Meta's vision model - 131K context"
+        },
+        {
+            "id": "opengvlab/internvl3-14b:free",
+            "name": "InternVL3 14B (Free)",
+            "provider": "openrouter",
+            "supports_search": False,
+            "description": "Advanced vision-language model - 12K context"
+        },
+        
+        # Balanced Performance Models
+        {
+            "id": "qwen/qwen3-32b:free",
+            "name": "Qwen3 32B (Free)",
+            "provider": "openrouter",
+            "supports_search": False,
+            "description": "Balanced performance model - 40K context"
+        },
+        {
+            "id": "google/gemma-3-27b-it:free",
+            "name": "Gemma 3 27B (Free)",
+            "provider": "openrouter",
+            "supports_search": False,
+            "description": "Google's open model - 96K context"
+        },
+        {
+            "id": "mistralai/mistral-small-24b-instruct-2501:free",
+            "name": "Mistral Small 3 (Free)",
+            "provider": "openrouter",
+            "supports_search": False,
+            "description": "Mistral's latest small model - 32K context"
+        },
+        {
+            "id": "thudm/glm-z1-32b:free",
+            "name": "GLM Z1 32B (Free)",
+            "provider": "openrouter",
+            "supports_search": False,
+            "description": "THUDM's advanced model - 32K context"
+        },
+        
+        # Fast & Efficient Models
+        {
+            "id": "qwen/qwen-2.5-72b-instruct:free",
+            "name": "Qwen2.5 72B (Free)",
+            "provider": "openrouter",
+            "supports_search": False,
+            "description": "Fast and capable model - 32K context"
+        },
+        {
+            "id": "meta-llama/llama-3.1-8b-instruct:free",
+            "name": "Llama 3.1 8B (Free)",
+            "provider": "openrouter",
+            "supports_search": False,
+            "description": "Efficient and fast model - 131K context"
+        },
+        {
+            "id": "qwen/qwen-2.5-7b-instruct:free",
+            "name": "Qwen2.5 7B (Free)",
+            "provider": "openrouter",
+            "supports_search": False,
+            "description": "Lightweight but capable - 32K context"
+        },
+        {
+            "id": "google/gemma-3-12b-it:free",
+            "name": "Gemma 3 12B (Free)",
+            "provider": "openrouter",
+            "supports_search": False,
+            "description": "Google's mid-size model - 96K context"
+        },
+        {
+            "id": "mistralai/mistral-nemo:free",
+            "name": "Mistral Nemo (Free)",
+            "provider": "openrouter",
+            "supports_search": False,
+            "description": "Mistral's efficient model - 131K context"
+        },
+        
+        # Lightweight Models
+        {
+            "id": "meta-llama/llama-3.2-3b-instruct:free",
+            "name": "Llama 3.2 3B (Free)",
+            "provider": "openrouter",
+            "supports_search": False,
+            "description": "Very fast lightweight model - 20K context"
+        },
+        {
+            "id": "google/gemma-3-4b-it:free",
+            "name": "Gemma 3 4B (Free)",
+            "provider": "openrouter",
+            "supports_search": False,
+            "description": "Google's compact model - 96K context"
+        },
+        {
+            "id": "mistralai/mistral-7b-instruct:free",
+            "name": "Mistral 7B (Free)",
+            "provider": "openrouter",
+            "supports_search": False,
+            "description": "Classic efficient model"
+        }
+    ]
+    models.extend(openrouter_models)
+    
+    # GitHub models
+    github_models = [
+        {
+            "id": "openai/gpt-4.1-mini",
+            "name": "GPT-4.1 Mini",
+            "provider": "github",
+            "supports_search": False,
+            "description": "OpenAI's GPT-4.1 Mini via GitHub Models"
+        },
+        {
+            "id": "openai/gpt-4.1",
+            "name": "GPT-4.1",
+            "provider": "github",
+            "supports_search": False,
+            "description": "OpenAI's GPT-4.1 via GitHub Models"
+        },
+        {
+            "id": "openai/gpt-4o",
+            "name": "GPT-4o",
+            "provider": "github",
+            "supports_search": False,
+            "description": "OpenAI's GPT-4o via GitHub Models"
+        },
+        {
+            "id": "openai/gpt-4o-mini",
+            "name": "GPT-4o Mini",
+            "provider": "github",
+            "supports_search": False,
+            "description": "OpenAI's GPT-4o Mini via GitHub Models"
+        },
+        {
+            "id": "openai/o4-mini",
+            "name": "o4 Mini",
+            "provider": "github",
+            "supports_search": False,
+            "description": "OpenAI's o4 Mini via GitHub Models"
+        },
+        {
+            "id": "openai/o3",
+            "name": "o3",
+            "provider": "github",
+            "supports_search": False,
+            "description": "OpenAI's o3 reasoning model via GitHub Models"
+        },
+        {
+            "id": "openai/gpt-4.1-nano",
+            "name": "GPT-4.1 Nano",
+            "provider": "github",
+            "supports_search": False,
+            "description": "OpenAI's GPT-4.1 Nano via GitHub Models"
+        },
+        {
+            "id": "openai/o1",
+            "name": "o1",
+            "provider": "github",
+            "supports_search": False,
+            "description": "OpenAI's o1 reasoning model via GitHub Models"
+        },
+        {
+            "id": "openai/o3-mini",
+            "name": "o3 Mini",
+            "provider": "github",
+            "supports_search": False,
+            "description": "OpenAI's o3 Mini reasoning model via GitHub Models"
+        },
+        {
+            "id": "deepseek/DeepSeek-V3-0324",
+            "name": "DeepSeek V3 0324",
+            "provider": "github",
+            "supports_search": False,
+            "description": "DeepSeek's V3 model via GitHub Models"
+        },
+        {
+            "id": "deepseek/DeepSeek-R1-0528",
+            "name": "DeepSeek R1 0528",
+            "provider": "github",
+            "supports_search": False,
+            "description": "DeepSeek's R1 reasoning model via GitHub Models"
+        },
+        {
+            "id": "deepseek/DeepSeek-R1",
+            "name": "DeepSeek R1",
+            "provider": "github",
+            "supports_search": False,
+            "description": "DeepSeek's latest R1 reasoning model via GitHub Models"
+        },
+        {
+            "id": "xai/grok-3",
+            "name": "Grok 3",
+            "provider": "github",
+            "supports_search": False,
+            "description": "XAI's Grok 3 via GitHub Models"
+        },
+        {
+            "id": "xai/grok-3-mini",
+            "name": "Grok 3 Mini",
+            "provider": "github",
+            "supports_search": False,
+            "description": "XAI's Grok 3 Mini via GitHub Models"
+        }
+    ]
+    models.extend(github_models)
+    
+    return {"models": models}
+
+
+@app.get("/openrouter/auth/key")
+async def get_openrouter_auth_key():
+    response = httpx.get(
+            url="https://openrouter.ai/api/v1/auth/key",
+            headers={
+                "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}"
+            }
+            )
+    return response.json()
 
 @app.get("/health")
 async def health():

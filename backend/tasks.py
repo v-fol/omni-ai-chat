@@ -6,6 +6,7 @@ from datetime import datetime
 from celery import current_task
 from celery.signals import worker_process_init
 from google import genai
+from openai import OpenAI
 from dotenv import load_dotenv
 import redis
 import redis.asyncio as redis_async
@@ -22,7 +23,26 @@ load_dotenv()
 
 # Configure Gemini
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-client = genai.Client(api_key=GOOGLE_API_KEY)
+gemini_client = genai.Client(api_key=GOOGLE_API_KEY)
+
+# Configure OpenRouter
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+SITE_URL = os.getenv("SITE_URL", "http://localhost:5173")
+SITE_NAME = os.getenv("SITE_NAME", "Omni AI Chat")
+
+openrouter_client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=OPENROUTER_API_KEY,
+)
+
+# Configure GitHub
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITHUB_ENDPOINT = "https://models.github.ai/inference"
+
+github_client = OpenAI(
+    base_url=GITHUB_ENDPOINT,
+    api_key=GITHUB_TOKEN,
+)
 
 # Synchronous Redis connection for Celery tasks
 redis_client = redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"))
@@ -101,7 +121,7 @@ def init_worker_process(sender=None, **kwargs):
     print(f"✅ Database initialized for worker process {os.getpid()}")
 
 @celery_app.task(bind=True)
-def generate_ai_response(self, chat_id: str, user_message: str, user_email: str):
+def generate_ai_response(self, chat_id: str, user_message: str, user_email: str, enable_search: bool = False):
     """
     Generate AI response and stream chunks to Redis Streams.
     Uses Motor directly to avoid Beanie event loop conflicts.
@@ -114,7 +134,7 @@ def generate_ai_response(self, chat_id: str, user_message: str, user_email: str)
         
         # Run the async function
         result = loop.run_until_complete(
-            _generate_ai_response_async(task_id, chat_id, user_message, user_email)
+            _generate_ai_response_async(task_id, chat_id, user_message, user_email, enable_search)
         )
         return result
             
@@ -123,7 +143,53 @@ def generate_ai_response(self, chat_id: str, user_message: str, user_email: str)
         _send_error_to_redis_stream_sync(chat_id, str(e))
         raise e
 
-async def _generate_ai_response_async(task_id: str, chat_id: str, user_message: str, user_email: str):
+@celery_app.task(bind=True)
+def generate_openrouter_response(self, chat_id: str, user_message: str, user_email: str, model_name: str):
+    """
+    Generate AI response using OpenRouter models and stream chunks to Redis Streams.
+    Uses Motor directly to avoid Beanie event loop conflicts.
+    """
+    task_id = self.request.id
+    
+    try:
+        # Get or create event loop for this thread/process
+        loop = get_or_create_event_loop()
+        
+        # Run the async function
+        result = loop.run_until_complete(
+            _generate_openrouter_response_async(task_id, chat_id, user_message, user_email, model_name)
+        )
+        return result
+            
+    except Exception as e:
+        # Send error to Redis stream using sync client
+        _send_error_to_redis_stream_sync(chat_id, str(e))
+        raise e
+
+@celery_app.task(bind=True)
+def generate_github_response(self, chat_id: str, user_message: str, user_email: str, model_name: str):
+    """
+    Generate AI response using GitHub models and stream chunks to Redis Streams.
+    Uses Motor directly to avoid Beanie event loop conflicts.
+    """
+    task_id = self.request.id
+    
+    try:
+        # Get or create event loop for this thread/process
+        loop = get_or_create_event_loop()
+        
+        # Run the async function
+        result = loop.run_until_complete(
+            _generate_github_response_async(task_id, chat_id, user_message, user_email, model_name)
+        )
+        return result
+            
+    except Exception as e:
+        # Send error to Redis stream using sync client
+        _send_error_to_redis_stream_sync(chat_id, str(e))
+        raise e
+
+async def _generate_ai_response_async(task_id: str, chat_id: str, user_message: str, user_email: str, enable_search: bool = False):
     """
     Async implementation of AI response generation with Redis Streams.
     Uses Motor directly to avoid event loop conflicts.
@@ -166,7 +232,7 @@ async def _generate_ai_response_async(task_id: str, chat_id: str, user_message: 
             "chat_id": chat_id,
             "from_user": False,
             "content": "",
-            "model": "gemini-2.0-flash",
+            "model": "gemini-2.0-flash" + (" + Google Search" if enable_search else ""),
             "created_at": datetime.now(),
             "status": "streaming",
             "is_complete": False
@@ -179,17 +245,40 @@ async def _generate_ai_response_async(task_id: str, chat_id: str, user_message: 
             "type": "start",
             "message_id": str(message_id),
             "task_id": task_id,
+            "search_enabled": str(enable_search),
             "timestamp": datetime.now().isoformat()
         })
         
-        # Generate streaming response from Gemini
-        full_content = ""
-        response = client.models.generate_content_stream(
-            model="gemini-2.0-flash",
-            contents=user_message
-        )
+        # Prepare generation config with optional Google Search
+        generation_config = {
+            "model": "gemini-2.0-flash",
+            "contents": user_message
+        }
+        
+        # Add Google Search tool if enabled
+        if enable_search:
+            from google.genai.types import Tool, GenerateContentConfig, GoogleSearch
+            
+            google_search_tool = Tool(google_search=GoogleSearch())
+            
+            # Generate streaming response from Gemini with Google Search
+            response = gemini_client.models.generate_content_stream(
+                model="gemini-2.0-flash",
+                contents=user_message,
+                config=GenerateContentConfig(
+                    tools=[google_search_tool],
+                    response_modalities=["TEXT"],
+                )
+            )
+        else:
+            # Generate streaming response from Gemini without search
+            response = gemini_client.models.generate_content_stream(
+                model="gemini-2.0-flash",
+                contents=user_message
+            )
         
         # Stream chunks to Redis Streams
+        full_content = ""
         for chunk in response:
             if chunk.text:
                 sequence += 1
@@ -240,16 +329,380 @@ async def _generate_ai_response_async(task_id: str, chat_id: str, user_message: 
             "final_sequence": sequence,
             "total_chunks": sequence,
             "final_length": len(full_content),
+            "search_enabled": str(enable_search),
             "timestamp": datetime.now().isoformat()
         })
         
-        print(f"✅ Completed AI response with {sequence} chunks in task {task_id}")
+        print(f"✅ Completed AI response with {sequence} chunks in task {task_id} (search: {enable_search})")
         
         return {
             "status": "complete",
             "message_id": str(message_id),
             "content": full_content,
-            "total_chunks": sequence
+            "total_chunks": sequence,
+            "search_enabled": enable_search
+        }
+        
+    except Exception as e:
+        # Fast error handling
+        if 'message_id' in locals():
+            try:
+                await db.messages.update_one(
+                    {"_id": message_id},
+                    {"$set": {"status": "incomplete"}}
+                )
+            except:
+                pass
+        
+        # Send error to stream
+        if redis_async_client:
+            try:
+                await redis_async_client.xadd(stream_name, {
+                    "type": "error",
+                    "content": f"Error: {str(e)}",
+                    "task_id": task_id,
+                    "timestamp": datetime.now().isoformat()
+                })
+            except:
+                pass
+        
+        raise e
+        
+    finally:
+        # Quick cleanup
+        if redis_async_client:
+            try:
+                await redis_async_client.close()
+            except:
+                pass
+
+async def _generate_openrouter_response_async(task_id: str, chat_id: str, user_message: str, user_email: str, model_name: str):
+    """
+    Async implementation of OpenRouter AI response generation with Redis Streams.
+    Uses Motor directly to avoid event loop conflicts.
+    """
+    stream_name = f"chat:{chat_id}:stream"
+    sequence = 0
+    redis_async_client = None
+    
+    try:
+        # Get database connection for this thread
+        db = get_database()
+        
+        # Create async Redis client with connection pooling
+        redis_async_client = redis_async.from_url(
+            get_redis_url(),
+            max_connections=20,
+            retry_on_timeout=True
+        )
+        
+        # Quick consumer group setup (ignore if exists)
+        try:
+            await redis_async_client.xgroup_create(
+                stream_name, "chat_consumers", "0", mkstream=True
+            )
+        except RedisResponseError as e:
+            if "BUSYGROUP" not in str(e):
+                raise
+        
+        # Fast user/chat verification using Motor directly
+        user = await db.users.find_one({"email": user_email})
+        if not user:
+            raise ValueError("User not found")
+            
+        chat = await db.chats.find_one({"_id": ObjectId(chat_id)})
+        if not chat or chat.get("user_id") != str(user["_id"]):
+            raise ValueError("Chat not found or unauthorized")
+        
+        # Create AI message record using Motor directly
+        ai_message_doc = {
+            "chat_id": chat_id,
+            "from_user": False,
+            "content": "",
+            "model": model_name,
+            "created_at": datetime.now(),
+            "status": "streaming",
+            "is_complete": False
+        }
+        result = await db.messages.insert_one(ai_message_doc)
+        message_id = result.inserted_id
+        
+        # Send start signal
+        await redis_async_client.xadd(stream_name, {
+            "type": "start",
+            "message_id": str(message_id),
+            "task_id": task_id,
+            "model": model_name,
+            "timestamp": datetime.now().isoformat()
+        })
+        
+        # Generate streaming response from OpenRouter
+        response = openrouter_client.chat.completions.create(
+            extra_headers={
+                "HTTP-Referer": SITE_URL,
+                "X-Title": SITE_NAME,
+            },
+            model=model_name,
+            messages=[
+                {
+                    "role": "user",
+                    "content": user_message
+                }
+            ],
+            stream=True
+        )
+        
+        # Stream chunks to Redis Streams
+        full_content = ""
+        for chunk in response:
+            # Check if chunk has choices and content
+            if (hasattr(chunk, 'choices') and 
+                len(chunk.choices) > 0 and 
+                hasattr(chunk.choices[0], 'delta') and 
+                hasattr(chunk.choices[0].delta, 'content') and 
+                chunk.choices[0].delta.content):
+                
+                sequence += 1
+                chunk_content = chunk.choices[0].delta.content
+                full_content += chunk_content
+                
+                # Add chunk to Redis Stream
+                await redis_async_client.xadd(stream_name, {
+                    "type": "chunk",
+                    "content": chunk_content,
+                    "sequence": sequence,
+                    "task_id": task_id,
+                    "total_length": len(full_content),
+                    "timestamp": datetime.now().isoformat()
+                })
+                
+                # Update database every 10 chunks for better performance
+                if sequence % 10 == 0:
+                    await db.messages.update_one(
+                        {"_id": message_id},
+                        {"$set": {"content": full_content}}
+                    )
+                
+                # Minimal delay only every 20th chunk
+                if sequence % 20 == 0:
+                    await asyncio.sleep(0.001)
+        
+        # Final updates using Motor directly
+        await db.messages.update_one(
+            {"_id": message_id},
+            {"$set": {
+                "content": full_content,
+                "status": "complete",
+                "is_complete": True
+            }}
+        )
+        
+        # Update chat timestamp
+        await db.chats.update_one(
+            {"_id": ObjectId(chat_id)},
+            {"$set": {"updated_at": datetime.now()}}
+        )
+        
+        # Send completion signal
+        await redis_async_client.xadd(stream_name, {
+            "type": "complete",
+            "message_id": str(message_id),
+            "task_id": task_id,
+            "final_sequence": sequence,
+            "total_chunks": sequence,
+            "final_length": len(full_content),
+            "model": model_name,
+            "timestamp": datetime.now().isoformat()
+        })
+        
+        print(f"✅ Completed OpenRouter response with {sequence} chunks in task {task_id} (model: {model_name})")
+        
+        return {
+            "status": "complete",
+            "message_id": str(message_id),
+            "content": full_content,
+            "total_chunks": sequence,
+            "model": model_name
+        }
+        
+    except Exception as e:
+        # Fast error handling
+        if 'message_id' in locals():
+            try:
+                await db.messages.update_one(
+                    {"_id": message_id},
+                    {"$set": {"status": "incomplete"}}
+                )
+            except:
+                pass
+        
+        # Send error to stream
+        if redis_async_client:
+            try:
+                await redis_async_client.xadd(stream_name, {
+                    "type": "error",
+                    "content": f"Error: {str(e)}",
+                    "task_id": task_id,
+                    "timestamp": datetime.now().isoformat()
+                })
+            except:
+                pass
+        
+        raise e
+        
+    finally:
+        # Quick cleanup
+        if redis_async_client:
+            try:
+                await redis_async_client.close()
+            except:
+                pass
+
+async def _generate_github_response_async(task_id: str, chat_id: str, user_message: str, user_email: str, model_name: str):
+    """
+    Async implementation of GitHub AI response generation with Redis Streams.
+    Uses Motor directly to avoid event loop conflicts.
+    """
+    stream_name = f"chat:{chat_id}:stream"
+    sequence = 0
+    redis_async_client = None
+    
+    try:
+        # Get database connection for this thread
+        db = get_database()
+        
+        # Create async Redis client with connection pooling
+        redis_async_client = redis_async.from_url(
+            get_redis_url(),
+            max_connections=20,
+            retry_on_timeout=True
+        )
+        
+        # Quick consumer group setup (ignore if exists)
+        try:
+            await redis_async_client.xgroup_create(
+                stream_name, "chat_consumers", "0", mkstream=True
+            )
+        except RedisResponseError as e:
+            if "BUSYGROUP" not in str(e):
+                raise
+        
+        # Fast user/chat verification using Motor directly
+        user = await db.users.find_one({"email": user_email})
+        if not user:
+            raise ValueError("User not found")
+            
+        chat = await db.chats.find_one({"_id": ObjectId(chat_id)})
+        if not chat or chat.get("user_id") != str(user["_id"]):
+            raise ValueError("Chat not found or unauthorized")
+        
+        # Create AI message record using Motor directly
+        ai_message_doc = {
+            "chat_id": chat_id,
+            "from_user": False,
+            "content": "",
+            "model": model_name,
+            "created_at": datetime.now(),
+            "status": "streaming",
+            "is_complete": False
+        }
+        result = await db.messages.insert_one(ai_message_doc)
+        message_id = result.inserted_id
+        
+        # Send start signal
+        await redis_async_client.xadd(stream_name, {
+            "type": "start",
+            "message_id": str(message_id),
+            "task_id": task_id,
+            "model": model_name,
+            "timestamp": datetime.now().isoformat()
+        })
+        
+        # Generate streaming response from GitHub
+        response = github_client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {
+                    "role": "user",
+                    "content": user_message
+                }
+            ],
+            stream=True,
+            temperature=1.0,
+            top_p=1.0
+        )
+        
+        # Stream chunks to Redis Streams
+        full_content = ""
+        for chunk in response:
+            # Check if chunk has choices and content
+            if (hasattr(chunk, 'choices') and 
+                len(chunk.choices) > 0 and 
+                hasattr(chunk.choices[0], 'delta') and 
+                hasattr(chunk.choices[0].delta, 'content') and 
+                chunk.choices[0].delta.content):
+                
+                sequence += 1
+                chunk_content = chunk.choices[0].delta.content
+                full_content += chunk_content
+                
+                # Add chunk to Redis Stream
+                await redis_async_client.xadd(stream_name, {
+                    "type": "chunk",
+                    "content": chunk_content,
+                    "sequence": sequence,
+                    "task_id": task_id,
+                    "total_length": len(full_content),
+                    "timestamp": datetime.now().isoformat()
+                })
+                
+                # Update database every 10 chunks for better performance
+                if sequence % 10 == 0:
+                    await db.messages.update_one(
+                        {"_id": message_id},
+                        {"$set": {"content": full_content}}
+                    )
+                
+                # Minimal delay only every 20th chunk
+                if sequence % 20 == 0:
+                    await asyncio.sleep(0.001)
+        
+        # Final updates using Motor directly
+        await db.messages.update_one(
+            {"_id": message_id},
+            {"$set": {
+                "content": full_content,
+                "status": "complete",
+                "is_complete": True
+            }}
+        )
+        
+        # Update chat timestamp
+        await db.chats.update_one(
+            {"_id": ObjectId(chat_id)},
+            {"$set": {"updated_at": datetime.now()}}
+        )
+        
+        # Send completion signal
+        await redis_async_client.xadd(stream_name, {
+            "type": "complete",
+            "message_id": str(message_id),
+            "task_id": task_id,
+            "final_sequence": sequence,
+            "total_chunks": sequence,
+            "final_length": len(full_content),
+            "model": model_name,
+            "timestamp": datetime.now().isoformat()
+        })
+        
+        print(f"✅ Completed GitHub response with {sequence} chunks in task {task_id} (model: {model_name})")
+        
+        return {
+            "status": "complete",
+            "message_id": str(message_id),
+            "content": full_content,
+            "total_chunks": sequence,
+            "model": model_name
         }
         
     except Exception as e:
@@ -317,4 +770,4 @@ def cleanup_expired_streams():
                 continue  # Skip problematic streams
                 
     except Exception as e:
-        print(f"Cleanup error: {e}") 
+        print(f"Cleanup error: {e}")
