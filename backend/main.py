@@ -1,6 +1,6 @@
 import os
 from typing import Union, Optional, List, AsyncGenerator
-from fastapi import FastAPI, Request, HTTPException, Depends, Query
+from fastapi import FastAPI, Request, HTTPException, Depends, Query, File, UploadFile
 from fastapi.responses import RedirectResponse, Response
 from authlib.integrations.starlette_client import OAuth, OAuthError
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,6 +19,7 @@ import redis.asyncio as redis
 from redis.exceptions import ResponseError as RedisResponseError, ConnectionError as RedisConnectionError
 from contextlib import asynccontextmanager
 import time
+import httpx
 
 from db.engine import User, Chat, Message, init as init_db
 from tasks import generate_ai_response
@@ -97,6 +98,10 @@ class CreateChatRequest(BaseModel):
 
 class SendMessageRequest(BaseModel):
     message: str
+
+class VoiceTranscriptionRequest(BaseModel):
+    audio_data: str  # Base64 encoded audio data
+    mime_type: str = "audio/mp3"
 
 @app.get("/")
 def read_root():
@@ -492,6 +497,66 @@ async def health():
         "redis": redis_status,
         "timestamp": datetime.now().isoformat()
     }
+
+@app.post("/voice/transcribe")
+async def transcribe_voice(request: Request, body: VoiceTranscriptionRequest):
+    """
+    Transcribe voice audio using Gemini API.
+    This endpoint is model-agnostic and can be used with any chat model.
+    """
+    user = await get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    try:
+        # Use Gemini API directly for transcription
+        async with httpx.AsyncClient() as http_client:
+            response = await http_client.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GOOGLE_API_KEY}",
+                headers={"Content-Type": "application/json"},
+                json={
+                    "contents": [{
+                        "parts": [
+                            {
+                                "text": "Listen to this audio and provide a more correctly spelled and formatted version of it so i can use it in the next prompt, dont add any other text."
+                            },
+                            {
+                                "inlineData": {
+                                    "mimeType": body.mime_type,
+                                    "data": body.audio_data
+                                }
+                            }
+                        ]
+                    }]
+                },
+                timeout=30.0
+            )
+        
+        if response.status_code != 200:
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Gemini API error: {response.status_code} - {response.text}"
+            )
+        
+        result = response.json()
+        
+        # Extract transcribed text from Gemini response
+        if "candidates" in result and len(result["candidates"]) > 0:
+            candidate = result["candidates"][0]
+            if "content" in candidate and "parts" in candidate["content"]:
+                transcribed_text = candidate["content"]["parts"][0].get("text", "")
+                return {
+                    "success": True,
+                    "transcribed_text": transcribed_text.strip()
+                }
+        
+        raise HTTPException(status_code=500, detail="No transcription found in response")
+        
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=408, detail="Transcription request timed out")
+    except Exception as e:
+        print(f"Voice transcription error: {e}")
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

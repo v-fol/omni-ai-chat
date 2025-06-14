@@ -15,6 +15,7 @@ import { useChat } from '@/lib/queries';
 import remarkGfm from 'remark-gfm';
 import Markdown from 'react-markdown';
 import { Switch } from '@/components/ui/switch';
+import { VoiceRecordButton } from '@/components/ui/VoiceRecordButton';
 
 const layoutConfig = {
   bottom: {
@@ -301,6 +302,11 @@ function ChatComponent() {
     }
   };
 
+  const handleVoiceTranscription = (transcribedText: string) => {
+    // Insert transcribed text into the input field for user to edit
+    setInputValue(transcribedText);
+  };
+
   const handleSSEStart = (messageId: string) => {
     console.log('AI response started, message ID:', messageId);
     // Create placeholder for AI message
@@ -413,10 +419,10 @@ function ChatComponent() {
   );
 
   const input = (
-    <div className={cn(config.inputWrapperClass, config.inputHeight)}>
+    <div className={cn(config.inputWrapperClass, config.inputHeight, "relative")}>
       <textarea
         className={cn(
-          "w-full p-2 rounded-md resize-none border focus:outline-none focus:ring-2 focus:ring-accent-blue/50",
+          "w-full p-2 pr-12 rounded-md resize-none border focus:outline-none focus:ring-2 focus:ring-accent-blue/50",
           config.inputHeight,
           theme === 'dark' ? 'bg-background-dark-secondary text-text-light-primary border-border-dark' : 'bg-background-secondary text-text-primary border-border-light'
         )}
@@ -427,6 +433,13 @@ function ChatComponent() {
         onKeyDown={handleKeyDown}
         disabled={isLoading}
       />
+      <div className="absolute right-2 top-2">
+        <VoiceRecordButton
+          onTranscriptionComplete={handleVoiceTranscription}
+          disabled={isLoading}
+          className="size-8"
+        />
+      </div>
     </div>
   );
   
