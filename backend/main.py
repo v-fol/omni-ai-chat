@@ -314,7 +314,7 @@ async def send_message_to_chat(chat_id: str, request: Request, body: SendMessage
     # Route to appropriate task based on provider
     if body.provider == "google":
         # Enqueue Celery task for Gemini AI response generation with optional search
-        task = generate_ai_response.delay(chat_id, body.message, user.email, body.enable_search)
+        task = generate_ai_response.delay(chat_id, user.email, body.enable_search)
         print(f"Enqueued Gemini AI response task {task.id} for chat {chat_id} (search: {body.enable_search})")
         
         return {
@@ -327,7 +327,7 @@ async def send_message_to_chat(chat_id: str, request: Request, body: SendMessage
         }
     elif body.provider == "openrouter":
         # Enqueue Celery task for OpenRouter AI response generation
-        task = generate_openrouter_response.delay(chat_id, body.message, user.email, body.model)
+        task = generate_openrouter_response.delay(chat_id, user.email, body.model)
         print(f"Enqueued OpenRouter AI response task {task.id} for chat {chat_id} (model: {body.model})")
         
         return {
@@ -340,7 +340,7 @@ async def send_message_to_chat(chat_id: str, request: Request, body: SendMessage
         }
     elif body.provider == "github":
         # Enqueue Celery task for GitHub AI response generation
-        task = generate_github_response.delay(chat_id, body.message, user.email, body.model)
+        task = generate_github_response.delay(chat_id, user.email, body.model)
         print(f"Enqueued GitHub AI response task {task.id} for chat {chat_id} (model: {body.model})")
         
         return {
