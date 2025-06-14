@@ -4,14 +4,18 @@ import json
 from typing import Optional
 from datetime import datetime
 from celery import current_task
+from celery.signals import worker_process_init
 from google import genai
 from dotenv import load_dotenv
 import redis
 import redis.asyncio as redis_async
 from redis.exceptions import ResponseError as RedisResponseError
+from functools import lru_cache
+import threading
+import motor.motor_asyncio
+from bson import ObjectId
 
 from celery_app import celery_app
-from db.engine import User, Chat, Message, init as init_db
 
 # Load environment variables
 load_dotenv()
@@ -23,25 +27,97 @@ client = genai.Client(api_key=GOOGLE_API_KEY)
 # Synchronous Redis connection for Celery tasks
 redis_client = redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"))
 
+# Thread-local storage for event loops and database connections
+_thread_local = threading.local()
+
+@lru_cache(maxsize=1)
+def get_redis_url():
+    """Cached Redis URL to avoid repeated env lookups."""
+    return os.getenv("REDIS_URL", "redis://localhost:6379/0")
+
+@lru_cache(maxsize=1)
+def get_mongodb_config():
+    """Get MongoDB configuration."""
+    return {
+        'url': os.getenv("MONGODB_URL", "mongodb://localhost:27017"),
+        'database': os.getenv("DATABASE_NAME", "omni_chat")
+    }
+
+async def init_thread_database():
+    """Initialize database connection for current thread with fresh Motor client."""
+    config = get_mongodb_config()
+    
+    print(f"🔗 Creating fresh MongoDB connection for thread {threading.current_thread().name}")
+    
+    # Create a completely new Motor client for this thread
+    client = motor.motor_asyncio.AsyncIOMotorClient(
+        config['url'],
+        # Force new connection pool per thread
+        maxPoolSize=5,
+        minPoolSize=1,
+        maxIdleTimeMS=30000,
+        serverSelectionTimeoutMS=5000
+    )
+    
+    # Get database reference
+    database = client[config['database']]
+    
+    print(f"✅ Database initialized for thread {threading.current_thread().name}")
+    return client, database
+
+def get_or_create_event_loop():
+    """Get or create an event loop and database connection for the current thread."""
+    if not hasattr(_thread_local, 'loop'):
+        # Create new event loop for this thread
+        _thread_local.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(_thread_local.loop)
+        
+        # Initialize database for this thread with fresh connection
+        _thread_local.db_client, _thread_local.database = _thread_local.loop.run_until_complete(init_thread_database())
+        _thread_local.db_initialized = True
+        
+        print(f"✅ Initialized event loop and database for thread {threading.current_thread().name}")
+    
+    return _thread_local.loop
+
+def get_database():
+    """Get the database connection for current thread."""
+    if not hasattr(_thread_local, 'database'):
+        get_or_create_event_loop()  # This will initialize the database
+    return _thread_local.database
+
+# Initialize database once per worker process (for processes pool)
+@worker_process_init.connect
+def init_worker_process(sender=None, **kwargs):
+    """Initialize database connection when worker process starts (processes pool only)."""
+    print(f"🔧 Initializing database for worker process {os.getpid()}")
+    
+    # Create event loop for this process
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    # Initialize database
+    loop.run_until_complete(init_thread_database())
+    print(f"✅ Database initialized for worker process {os.getpid()}")
+
 @celery_app.task(bind=True)
 def generate_ai_response(self, chat_id: str, user_message: str, user_email: str):
     """
     Generate AI response and stream chunks to Redis Streams.
-    This task runs in the background and stores chunks persistently.
+    Uses Motor directly to avoid Beanie event loop conflicts.
     """
     task_id = self.request.id
     
     try:
-        # Run the async function in a new event loop
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            result = loop.run_until_complete(
-                _generate_ai_response_async(task_id, chat_id, user_message, user_email)
-            )
-            return result
-        finally:
-            loop.close()
+        # Get or create event loop for this thread/process
+        loop = get_or_create_event_loop()
+        
+        # Run the async function
+        result = loop.run_until_complete(
+            _generate_ai_response_async(task_id, chat_id, user_message, user_email)
+        )
+        return result
+            
     except Exception as e:
         # Send error to Redis stream using sync client
         _send_error_to_redis_stream_sync(chat_id, str(e))
@@ -50,196 +126,195 @@ def generate_ai_response(self, chat_id: str, user_message: str, user_email: str)
 async def _generate_ai_response_async(task_id: str, chat_id: str, user_message: str, user_email: str):
     """
     Async implementation of AI response generation with Redis Streams.
+    Uses Motor directly to avoid event loop conflicts.
     """
     stream_name = f"chat:{chat_id}:stream"
     sequence = 0
+    redis_async_client = None
     
     try:
-        # Initialize database connection
-        await init_db()
+        # Get database connection for this thread
+        db = get_database()
         
-        # Create async Redis client for this function
-        redis_async_client = redis_async.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"))
+        # Create async Redis client with connection pooling
+        redis_async_client = redis_async.from_url(
+            get_redis_url(),
+            max_connections=20,
+            retry_on_timeout=True
+        )
         
+        # Quick consumer group setup (ignore if exists)
         try:
-            # Create consumer group (ignore if already exists)
-            try:
-                await redis_async_client.xgroup_create(
-                    stream_name, 
-                    "chat_consumers", 
-                    "0", 
-                    mkstream=True
-                )
-                print(f"Created consumer group for {stream_name}")
-            except RedisResponseError as e:
-                if "BUSYGROUP" not in str(e):
-                    raise
-                # Group already exists, continue
-                pass
+            await redis_async_client.xgroup_create(
+                stream_name, "chat_consumers", "0", mkstream=True
+            )
+        except RedisResponseError as e:
+            if "BUSYGROUP" not in str(e):
+                raise
+        
+        # Fast user/chat verification using Motor directly
+        user = await db.users.find_one({"email": user_email})
+        if not user:
+            raise ValueError("User not found")
             
-            # Verify user and chat
-            user = await User.find_one(User.email == user_email)
-            if not user:
-                raise ValueError("User not found")
+        chat = await db.chats.find_one({"_id": ObjectId(chat_id)})
+        if not chat or chat.get("user_id") != str(user["_id"]):
+            raise ValueError("Chat not found or unauthorized")
+        
+        # Create AI message record using Motor directly
+        ai_message_doc = {
+            "chat_id": chat_id,
+            "from_user": False,
+            "content": "",
+            "model": "gemini-2.0-flash",
+            "created_at": datetime.now(),
+            "status": "streaming",
+            "is_complete": False
+        }
+        result = await db.messages.insert_one(ai_message_doc)
+        message_id = result.inserted_id
+        
+        # Send start signal
+        await redis_async_client.xadd(stream_name, {
+            "type": "start",
+            "message_id": str(message_id),
+            "task_id": task_id,
+            "timestamp": datetime.now().isoformat()
+        })
+        
+        # Generate streaming response from Gemini
+        full_content = ""
+        response = client.models.generate_content_stream(
+            model="gemini-2.0-flash",
+            contents=user_message
+        )
+        
+        # Stream chunks to Redis Streams
+        for chunk in response:
+            if chunk.text:
+                sequence += 1
+                full_content += chunk.text
                 
-            chat = await Chat.get(chat_id)
-            if not chat or chat.user_id != str(user.id):
-                raise ValueError("Chat not found or unauthorized")
-            
-            # Create AI message record
-            ai_message = Message(
-                chat_id=chat_id,
-                from_user=False,
-                content="",
-                model="gemini-2.0-flash",
-                created_at=datetime.now(),
-                status="streaming",
-                is_complete=False
-            )
-            await ai_message.insert()
-            
-            # Send start signal to stream
-            await redis_async_client.xadd(
-                stream_name,
-                {
-                    "type": "start",
-                    "message_id": str(ai_message.id),
+                # Add chunk to Redis Stream
+                await redis_async_client.xadd(stream_name, {
+                    "type": "chunk",
+                    "content": chunk.text,
+                    "sequence": sequence,
                     "task_id": task_id,
+                    "total_length": len(full_content),
                     "timestamp": datetime.now().isoformat()
-                }
-            )
-            
-            # Prepare for streaming
-            full_content = ""
-            
-            # Generate streaming response from Gemini
-            response = client.models.generate_content_stream(
-                model="gemini-2.0-flash",
-                contents=user_message
-            )
-            
-            # Stream chunks to Redis Streams
-            for chunk in response:
-                if chunk.text:
-                    sequence += 1
-                    full_content += chunk.text
-                    
-                    # Add chunk to Redis Stream (persistent!)
-                    message_id = await redis_async_client.xadd(
-                        stream_name,
-                        {
-                            "type": "chunk",
-                            "content": chunk.text,
-                            "sequence": sequence,
-                            "task_id": task_id,
-                            "total_length": len(full_content),
-                            "timestamp": datetime.now().isoformat()
-                        }
+                })
+                
+                # Update database every 10 chunks for better performance
+                if sequence % 10 == 0:
+                    await db.messages.update_one(
+                        {"_id": message_id},
+                        {"$set": {"content": full_content}}
                     )
-                    
-                    print(f"Added chunk {sequence} to stream: {message_id}")
-                    
-                    # Update message in database with current content
-                    ai_message.content = full_content
-                    await ai_message.save()
-                    
-                    # Small delay to prevent overwhelming
-                    await asyncio.sleep(0.01)
-            
-            # Mark message as complete
-            ai_message.status = "complete"
-            ai_message.is_complete = True
-            await ai_message.save()
-            
-            # Update chat timestamp
-            chat.updated_at = datetime.now()
-            await chat.save()
-            
-            # Send completion signal to stream
-            await redis_async_client.xadd(
-                stream_name,
-                {
-                    "type": "complete",
-                    "message_id": str(ai_message.id),
-                    "task_id": task_id,
-                    "final_sequence": sequence,
-                    "total_chunks": sequence,
-                    "final_length": len(full_content),
-                    "timestamp": datetime.now().isoformat()
-                }
-            )
-            
-            print(f"Completed AI response with {sequence} chunks")
-            
-            # Schedule cleanup of old stream data (keep last 1000 messages)
-            try:
-                await redis_async_client.xtrim(stream_name, maxlen=1000, approximate=True)
-            except Exception as trim_error:
-                print(f"Warning: Failed to trim stream: {trim_error}")
-            
-            return {
-                "status": "complete",
-                "message_id": str(ai_message.id),
+                
+                # Minimal delay only every 20th chunk
+                if sequence % 20 == 0:
+                    await asyncio.sleep(0.001)
+        
+        # Final updates using Motor directly
+        await db.messages.update_one(
+            {"_id": message_id},
+            {"$set": {
                 "content": full_content,
-                "total_chunks": sequence
-            }
-            
-        finally:
-            await redis_async_client.close()
+                "status": "complete",
+                "is_complete": True
+            }}
+        )
+        
+        # Update chat timestamp
+        await db.chats.update_one(
+            {"_id": ObjectId(chat_id)},
+            {"$set": {"updated_at": datetime.now()}}
+        )
+        
+        # Send completion signal
+        await redis_async_client.xadd(stream_name, {
+            "type": "complete",
+            "message_id": str(message_id),
+            "task_id": task_id,
+            "final_sequence": sequence,
+            "total_chunks": sequence,
+            "final_length": len(full_content),
+            "timestamp": datetime.now().isoformat()
+        })
+        
+        print(f"✅ Completed AI response with {sequence} chunks in task {task_id}")
+        
+        return {
+            "status": "complete",
+            "message_id": str(message_id),
+            "content": full_content,
+            "total_chunks": sequence
+        }
         
     except Exception as e:
-        # Mark message as incomplete if it exists
-        try:
-            if 'ai_message' in locals():
-                ai_message.status = "incomplete"
-                await ai_message.save()
-        except:
-            pass
-            
-        # Send error to Redis Stream
-        _send_error_to_redis_stream_sync(chat_id, str(e))
+        # Fast error handling
+        if 'message_id' in locals():
+            try:
+                await db.messages.update_one(
+                    {"_id": message_id},
+                    {"$set": {"status": "incomplete"}}
+                )
+            except:
+                pass
+        
+        # Send error to stream
+        if redis_async_client:
+            try:
+                await redis_async_client.xadd(stream_name, {
+                    "type": "error",
+                    "content": f"Error: {str(e)}",
+                    "task_id": task_id,
+                    "timestamp": datetime.now().isoformat()
+                })
+            except:
+                pass
+        
         raise e
+        
+    finally:
+        # Quick cleanup
+        if redis_async_client:
+            try:
+                await redis_async_client.close()
+            except:
+                pass
 
 def _send_error_to_redis_stream_sync(chat_id: str, error_message: str):
-    """Helper function to send error messages to Redis Stream using sync client."""
+    """Fast error reporting to Redis Stream."""
     try:
         stream_name = f"chat:{chat_id}:stream"
-        redis_client.xadd(
-            stream_name,
-            {
-                "type": "error",
-                "content": f"Error: {error_message}",
-                "timestamp": datetime.now().isoformat()
-            }
-        )
-    except Exception as e:
-        print(f"Failed to send error to Redis Stream: {e}")
+        redis_client.xadd(stream_name, {
+            "type": "error",
+            "content": f"Error: {error_message}",
+            "timestamp": datetime.now().isoformat()
+        })
+    except:
+        pass  # Fail silently to avoid blocking
 
 @celery_app.task
 def cleanup_expired_streams():
-    """
-    Periodic task to clean up expired Redis streams.
-    Can be scheduled with Celery Beat.
-    """
+    """Fast cleanup of expired Redis streams."""
     try:
-        # Get all chat streams
         pattern = "chat:*:stream"
-        for key in redis_client.scan_iter(match=pattern):
-            key_str = key.decode() if isinstance(key, bytes) else key
-            
-            # Get stream info
+        current_time_ms = int(datetime.now().timestamp() * 1000)
+        
+        for key in redis_client.scan_iter(match=pattern, count=100):
             try:
-                info = redis_client.xinfo_stream(key_str)
-                last_entry_time = info.get('last-generated-id', '0-0').split('-')[0]
+                info = redis_client.xinfo_stream(key)
+                last_entry_time = int(info.get('last-generated-id', '0-0').split('-')[0])
                 
-                # If stream is older than 24 hours, delete it
-                current_time_ms = int(datetime.now().timestamp() * 1000)
-                if current_time_ms - int(last_entry_time) > 24 * 60 * 60 * 1000:
-                    redis_client.delete(key_str)
-                    print(f"Cleaned up expired stream: {key_str}")
+                # Delete streams older than 24 hours
+                if current_time_ms - last_entry_time > 24 * 60 * 60 * 1000:
+                    redis_client.delete(key)
                     
-            except Exception as e:
-                print(f"Error processing stream {key_str}: {e}")
+            except:
+                continue  # Skip problematic streams
                 
     except Exception as e:
-        print(f"Error in cleanup task: {e}") 
+        print(f"Cleanup error: {e}") 

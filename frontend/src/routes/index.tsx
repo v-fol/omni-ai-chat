@@ -9,6 +9,7 @@ import { useState } from 'react';
 import { LayoutGrid, ArrowDown, Sun, Moon } from 'lucide-react';
 import { useCreateChat } from '@/lib/queries';
 import { Switch } from '@/components/ui/switch';
+import { VoiceRecordButton } from '@/components/ui/VoiceRecordButton';
 
 const layoutConfig = {
   bottom: { inputWrapperClass: 'pl-0 pb-1 pt-2 pr-4', controlsWrapperClass: 'flex flex-col items-center gap-2 p-2', inputRows: 3, inputHeight: '' },
@@ -54,6 +55,11 @@ function NewChatComponent() {
       handleSendMessage();
     }
   };
+
+  const handleVoiceTranscription = (transcribedText: string) => {
+    // Insert transcribed text into the input field for user to edit
+    setInputValue(transcribedText);
+  };
   
   const handlePositionChange = () => {
     const positions = Object.keys(layoutConfig) as (keyof typeof layoutConfig)[];
@@ -85,9 +91,9 @@ function NewChatComponent() {
   );
 
   const input = (
-    <div className={cn(config.inputWrapperClass, config.inputHeight)}>
+    <div className={cn(config.inputWrapperClass, config.inputHeight, "relative")}>
       <textarea
-        className={cn("w-full p-2 rounded-md resize-none border focus:outline-none focus:ring-2 focus:ring-accent-blue/50", config.inputHeight, theme === 'dark' ? 'bg-background-dark-secondary text-text-light-primary border-border-dark' : 'bg-background-secondary text-text-primary border-border-light')}
+        className={cn("w-full p-2 pr-12 rounded-md resize-none border focus:outline-none focus:ring-2 focus:ring-accent-blue/50", config.inputHeight, theme === 'dark' ? 'bg-background-dark-secondary text-text-light-primary border-border-dark' : 'bg-background-secondary text-text-primary border-border-light')}
         rows={config.inputRows}
         placeholder="Type a message to start a new chat..."
         value={inputValue}
@@ -95,6 +101,13 @@ function NewChatComponent() {
         onKeyPress={handleKeyPress}
         disabled={createChatMutation.isPending}
       />
+      <div className="absolute right-6 top-4">
+        <VoiceRecordButton
+          onTranscriptionComplete={handleVoiceTranscription}
+          disabled={createChatMutation.isPending}
+          className="size-8"
+        />
+      </div>
     </div>
   );
   

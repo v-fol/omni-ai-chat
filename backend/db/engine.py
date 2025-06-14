@@ -1,6 +1,7 @@
 from typing import Optional
 from datetime import datetime
 import uuid
+import os
 
 import motor.motor_asyncio
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -57,8 +58,17 @@ class User(Document):
 
 # Call this from within your event loop to get beanie setup.
 async def init():
+    # Get MongoDB URL from environment or use default
+    mongodb_url = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
+    database_name = os.getenv("DATABASE_NAME", "omni_chat")
+    
+    print(f"🔗 Connecting to MongoDB: {mongodb_url}")
+    print(f"📊 Using database: {database_name}")
+    
     # Create Motor client
-    client = AsyncIOMotorClient("mongodb://localhost:27017")
+    client = AsyncIOMotorClient(mongodb_url)
 
     # Init beanie with all document models
-    await init_beanie(database=client.db_name, document_models=[User, Chat, Message])
+    await init_beanie(database=client[database_name], document_models=[User, Chat, Message])
+    
+    print("✅ Database connection established")

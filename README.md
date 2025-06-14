@@ -12,8 +12,9 @@ Submission for the t3 chat cloneathon [https://cloneathon.t3.chat/](https://clon
 - [X] Ability to move input area to bottom/top/right of the screen
 - [X] Auto scroll / scroll to bottom on new message / no auto scroll toggle
 - [X] Chat navigation through conversation topics minimized to a sidebar
-- [ ] Audio input
+- [X] Voice input
 - [ ] Audio output
+- [ ] Goolge search functionality
 - [ ] Image input
 - [ ] Image output
 - [ ] File input
@@ -47,5 +48,5 @@ Submission for the t3 chat cloneathon [https://cloneathon.t3.chat/](https://clon
 - [ ] Chat branching
 - [ ] Temporary chats (for one-time conversations)
 - [ ] Temporary inline chats (for quick questions)
-- [ ] Resumable streams
+- [X] Resumable streams
 - [ ] Local llms with langchain or similar
