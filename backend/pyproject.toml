@@ -11,4 +11,7 @@ dependencies = [
     "google-genai>=1.19.0",
     "itsdangerous>=2.2.0",
     "python-dotenv>=1.1.0",
+    "redis>=5.0.1",
+    "celery>=5.3.4",
+    "sse-starlette>=1.8.2",
 ]

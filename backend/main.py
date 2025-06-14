@@ -1,6 +1,6 @@
 import os
-from typing import Union, Optional, List
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, Depends
+from typing import Union, Optional, List, AsyncGenerator
+from fastapi import FastAPI, Request, HTTPException, Depends, Query
 from fastapi.responses import RedirectResponse, Response
 from authlib.integrations.starlette_client import OAuth, OAuthError
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,8 +14,14 @@ import uuid
 import base64
 import json
 from pydantic import BaseModel
+from sse_starlette.sse import EventSourceResponse
+import redis.asyncio as redis
+from redis.exceptions import ResponseError as RedisResponseError, ConnectionError as RedisConnectionError
+from contextlib import asynccontextmanager
+import time
 
 from db.engine import User, Chat, Message, init as init_db
+from tasks import generate_ai_response
 
 # Load environment variables
 load_dotenv()
@@ -24,13 +30,23 @@ load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 client = genai.Client(api_key=GOOGLE_API_KEY)
 
-app = FastAPI()
-app.add_middleware(SessionMiddleware, secret_key=os.getenv("SECRET_KEY"))
+# Initialize Redis
+redis_client = None
 
-# Initialize database on startup
-@app.on_event("startup")
-async def startup_event():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global redis_client
+    # Startup
     await init_db()
+    redis_client = redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"))
+    print("Connected to Redis and MongoDB")
+    yield
+    # Shutdown
+    if redis_client:
+        await redis_client.close()
+
+app = FastAPI(lifespan=lifespan)
+app.add_middleware(SessionMiddleware, secret_key=os.getenv("SECRET_KEY"))
 
 # Helper function to get current user
 async def get_current_user(request: Request) -> Optional[User]:
@@ -78,6 +94,9 @@ app.add_middleware(
 
 class CreateChatRequest(BaseModel):
     first_message: str
+
+class SendMessageRequest(BaseModel):
+    message: str
 
 @app.get("/")
 def read_root():
@@ -163,7 +182,7 @@ async def create_chat(request: Request, body: CreateChatRequest):
     if len(body.first_message.split()) > 10:
         title += "..."
 
-    # Create the new chat
+    # Create the new chat (without the first message)
     new_chat = Chat(
         user_id=str(user.id),
         title=title,
@@ -171,35 +190,17 @@ async def create_chat(request: Request, body: CreateChatRequest):
         updated_at=datetime.now()
     )
     await new_chat.insert()
-    
-    # Create and save the first user message
-    user_message = Message(
-        chat_id=str(new_chat.id),
-        from_user=True,
-        content=body.first_message,
-        model="user",
-        created_at=datetime.now()
-    )
-    await user_message.insert()
 
-    print(f"Created new chat {new_chat.id} with title '{title}' and first message.")
+    print(f"Created new chat {new_chat.id} with title '{title}'. First message will be sent via SSE.")
     
-    # Return the full new chat object, making sure IDs are strings
+    # Return the chat object without any messages
+    # The frontend will send the first message after SSE connection
     return {
         "id": str(new_chat.id),
         "title": new_chat.title,
         "created_at": new_chat.created_at,
         "updated_at": new_chat.updated_at,
-        "messages": [{
-            "id": str(user_message.id),
-            "chat_id": str(new_chat.id),
-            "from_user": user_message.from_user,
-            "content": user_message.content,
-            "model": user_message.model,
-            "created_at": user_message.created_at,
-            "is_complete": user_message.is_complete,
-            "status": user_message.status,
-        }]
+        "messages": []  # Empty messages array
     }
 
 @app.get("/chats")
@@ -250,6 +251,7 @@ async def get_chat(chat_id: str, request: Request):
 
 @app.delete("/chat/{chat_id}")
 async def delete_chat(chat_id: str, request: Request):
+    global redis_client
     user = await get_current_user(request)
     if not user:
         raise HTTPException(status_code=401, detail="Not authenticated")
@@ -259,174 +261,237 @@ async def delete_chat(chat_id: str, request: Request):
     if not chat or chat.user_id != str(user.id):
         raise HTTPException(status_code=404, detail="Chat not found")
     
-    try:
-        # Delete all messages in the chat
-        await Message.find(Message.chat_id == chat_id).delete()
-        
-        # Delete the chat
-        await chat.delete()
-        
-        return {"message": "Chat deleted successfully"}
-    except Exception as e:
-        print(f"Error deleting chat: {e}")
-        raise HTTPException(status_code=500, detail="Failed to delete chat")
-
-@app.websocket("/chat/{chat_id}/ws")
-async def chat_websocket(websocket: WebSocket, chat_id: str):
-    """
-    WebSocket endpoint for streaming chat responses from Gemini.
-    """
-    print("New WebSocket connection attempt...")
-    await websocket.accept()
-    print("WebSocket connection accepted")
+    # Delete all messages in the chat
+    await Message.find(Message.chat_id == chat_id).delete()
     
+    # Delete the chat
+    await chat.delete()
+
+    # Clean up Redis stream
+    stream_name = f"chat:{chat_id}:stream"
     try:
-        # Get user from session cookie
-        cookies = websocket.cookies
-        session = cookies.get("session")
-        if not session:
-            print("No session cookie found")
-            await websocket.close(code=1008, reason="Not authenticated")
-            return
-
-
-        # Parse session data using the same method as SessionMiddleware
-        try:
-            # First, base64 decode the session
-            decoded = base64.b64decode(session)
-
-            # The session data is just JSON encoded, no need for signature extraction
-            session_data = json.loads(decoded)
-            
-            user_data = session_data.get('user')
-            if not user_data:
-                print("No user data in session")
-                await websocket.close(code=1008, reason="Not authenticated")
-                return
-                
-        except Exception as e:
-            print(f"Failed to decode session: {e}")
-            print(f"Session content type: {type(session)}")
-            await websocket.close(code=1008, reason="Invalid session")
-            return
-
-        # Find user in database
-        user = await User.find_one(User.email == user_data['email'])
-        if not user:
-            print("User not found in database")
-            await websocket.close(code=1008, reason="User not found")
-            return
-            
-        # Find chat and verify ownership
-        chat = await Chat.get(chat_id)
-        if not chat or chat.user_id != str(user.id):
-            print("Chat not found or unauthorized")
-            await websocket.close(code=1008, reason="Chat not found")
-            return
-        
-        print(f"WebSocket connection established for user {user.email} and chat {chat_id}")
-        
-        while True:
-            message_text = await websocket.receive_text()
-            print(f"Received message: {message_text}")
-            
-            # Check if the received message is a duplicate of the first message saved via HTTP
-            # to prevent creating a duplicate entry.
-            message_count = await Message.find(
-                {"chat_id": chat_id, "from_user": True}
-            ).count()
-            
-            should_save = True
-            if message_count == 1:
-                first_message = await Message.find_one(
-                    {"chat_id": chat_id, "from_user": True}
-                )
-                if first_message and first_message.content == message_text:
-                    print("Kick-off message is the same as the one saved via HTTP. Skipping save.")
-                    should_save = False
-
-            if should_save:
-                user_message = Message(
-                    chat_id=chat_id,
-                    from_user=True,
-                    content=message_text,
-                    model="user",
-                    created_at=datetime.now(),
-                )
-                await user_message.insert()
-
-            # Title is now set exclusively by the POST /chat endpoint.
-            
-            try:
-                # Generate streaming response
-                response = client.models.generate_content_stream(
-                    model="gemini-2.0-flash",
-                    contents=message_text
-                )
-                
-                # Create AI message to store the complete response
-                ai_message = Message(
-                    chat_id=chat_id,
-                    from_user=False,
-                    content="",
-                    model="gemini-2.0-flash",
-                    created_at=datetime.now(),
-                    status="streaming",
-                    is_complete=False
-                )
-                await ai_message.insert()
-                
-                # Stream each chunk to the client with a small delay
-                try:
-                    for chunk in response:
-                        if chunk.text:
-                            await websocket.send_text(chunk.text)
-                            print(f"Sent chunk: {chunk.text[:50]}...")
-                            # Update the AI message content
-                            ai_message.content += chunk.text
-                            await ai_message.save()
-                            # Add a tiny delay to ensure chunks are processed separately
-                            await asyncio.sleep(0.01)
-                    
-                    # Mark message as complete
-                    ai_message.status = "complete"
-                    ai_message.is_complete = True
-                    await ai_message.save()
-                    
-                    # Update chat's updated_at timestamp
-                    chat.updated_at = datetime.now()
-                    await chat.save()
-                    
-                    # Send a special marker to indicate response completion
-                    await websocket.send_text("[DONE]")
-                    print("Sent [DONE] marker")
-                except WebSocketDisconnect:
-                    # Mark message as incomplete if connection drops
-                    ai_message.status = "incomplete"
-                    await ai_message.save()
-                    raise
-                except Exception as e:
-                    print(f"Error in streaming: {e}")
-                    ai_message.status = "incomplete"
-                    await ai_message.save()
-                    raise
-                    
-            except Exception as e:
-                error_message = f"Error: {str(e)}"
-                print(f"Error generating response: {error_message}")
-                await websocket.send_text(error_message)
-                await websocket.send_text("[DONE]")
-                
-    except WebSocketDisconnect:
-        print("Client disconnected")
+        await redis_client.delete(stream_name)
+        print(f"Cleaned up Redis stream: {stream_name}")
     except Exception as e:
-        print(f"WebSocket error: {str(e)}")
+        print(f"Error cleaning up Redis stream: {e}")
+
+    return {"status": "Chat deleted"}
+
+@app.post("/chat/{chat_id}/send")
+async def send_message_to_chat(chat_id: str, request: Request, body: SendMessageRequest):
+    """
+    Send a new message to the chat and trigger AI response generation via Celery.
+    Returns immediately after enqueuing the task.
+    """
+    user = await get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    # Verify chat ownership
+    chat = await Chat.get(chat_id)
+    if not chat or chat.user_id != str(user.id):
+        raise HTTPException(status_code=404, detail="Chat not found")
+    
+    # Save user message
+    user_message = Message(
+        chat_id=chat_id,
+        from_user=True,
+        content=body.message,
+        model="user",
+        created_at=datetime.now()
+    )
+    await user_message.insert()
+    
+    # Enqueue Celery task for AI response generation
+    task = generate_ai_response.delay(chat_id, body.message, user.email)
+    
+    print(f"Enqueued AI response task {task.id} for chat {chat_id}")
+    
+    return {
+        "message": "Message sent successfully",
+        "task_id": task.id,
+        "user_message_id": str(user_message.id)
+    }
+
+@app.get("/sse/chat/{chat_id}")
+async def stream_chat_messages(
+    request: Request,
+    chat_id: str,
+    last_id: Optional[str] = Query(None, description="Last received message ID for resume")
+):
+    """
+    SSE endpoint for streaming chat messages from Redis Streams.
+    Supports resuming from a specific message ID for page refresh recovery.
+    """
+    # Use existing authentication system
+    user = await get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    # Verify chat ownership
+    chat = await Chat.get(chat_id)
+    if not chat or chat.user_id != str(user.id):
+        raise HTTPException(status_code=404, detail="Chat not found")
+    
+    async def event_stream() -> AsyncGenerator[str, None]:
+        global redis_client
+        stream_name = f"chat:{chat_id}:stream"
+        consumer_group = "chat_consumers"
+        consumer_name = f"consumer_{user.email}_{int(time.time())}"
+        current_last_id = last_id or "$"  # Use parameter value or default to latest
+        
         try:
-            await websocket.close(code=1011, reason=str(e))
-        except:
-            pass
-    finally:
-        print("WebSocket connection closed")
+            # Create consumer group if it doesn't exist
+            try:
+                await redis_client.xgroup_create(
+                    stream_name, 
+                    consumer_group, 
+                    "0", 
+                    mkstream=True
+                )
+                print(f"Created consumer group {consumer_group} for {stream_name}")
+            except RedisResponseError as e:
+                if "BUSYGROUP" not in str(e):
+                    raise
+                # Group already exists
+                pass
+            
+            # Determine starting point
+            if last_id:  # Check if we have a real last_id from query parameter
+                # Resume from specific message ID for page refresh recovery
+                print(f"Resuming stream from message ID: {last_id}")
+                # Read all messages after the last_id
+                try:
+                    # Get missed messages since last_id
+                    missed_messages = await redis_client.xrange(
+                        stream_name, 
+                        min=f"({last_id}",  # Exclusive range after last_id
+                        max="+",
+                        count=100
+                    )
+                    
+                    # Send missed messages first
+                    for msg_id, fields in missed_messages:
+                        msg_id_str = msg_id.decode() if isinstance(msg_id, bytes) else msg_id
+                        parsed_fields = {
+                            k.decode() if isinstance(k, bytes) else k: 
+                            v.decode() if isinstance(v, bytes) else v 
+                            for k, v in fields.items()
+                        }
+                        
+                        yield f"data: {json.dumps({**parsed_fields, 'stream_id': msg_id_str})}\n\n"
+                        
+                    print(f"Sent {len(missed_messages)} missed messages")
+                    
+                except Exception as e:
+                    print(f"Error getting missed messages: {e}")
+                    # If error, start from latest
+                    current_last_id = "$"
+            
+            # Send initial connection confirmation
+            yield f"data: {json.dumps({'type': 'connected', 'consumer': consumer_name, 'timestamp': datetime.now().isoformat()})}\n\n"
+            
+            heartbeat_counter = 0
+            last_heartbeat = time.time()
+            
+            # Main streaming loop for new messages
+            while True:
+                if await request.is_disconnected():
+                    print(f"Client disconnected from {stream_name}")
+                    break
+                
+                try:
+                    # Read new messages from stream using consumer group
+                    messages = await redis_client.xreadgroup(
+                        consumer_group,
+                        consumer_name,
+                        {stream_name: ">"},  # Read only new messages
+                        count=1,
+                        block=1000  # Block for 1 second
+                    )
+                    
+                    if messages:
+                        for stream_key, stream_messages in messages:
+                            for msg_id, fields in stream_messages:
+                                # Decode message
+                                msg_id_str = msg_id.decode() if isinstance(msg_id, bytes) else msg_id
+                                parsed_fields = {
+                                    k.decode() if isinstance(k, bytes) else k: 
+                                    v.decode() if isinstance(v, bytes) else v 
+                                    for k, v in fields.items()
+                                }
+                                
+                                # Send message to client
+                                message_data = {**parsed_fields, "stream_id": msg_id_str}
+                                yield f"data: {json.dumps(message_data)}\n\n"
+                                
+                                # Acknowledge message processing
+                                await redis_client.xack(stream_name, consumer_group, msg_id)
+                                
+                                # Update current_last_id for potential reconnection
+                                current_last_id = msg_id_str
+                                
+                                print(f"Streamed message {msg_id_str}: {parsed_fields.get('type', 'unknown')}")
+                    
+                    else:
+                        # No new messages, send heartbeat occasionally
+                        current_time = time.time()
+                        if current_time - last_heartbeat >= 60:  # Every 60 seconds
+                            heartbeat_counter += 1
+                            if heartbeat_counter % 10 == 0:  # Log every 10th heartbeat
+                                print(f"Heartbeat #{heartbeat_counter} for {stream_name}")
+                            
+                            yield f"data: {json.dumps({'type': 'heartbeat', 'timestamp': datetime.now().isoformat(), 'last_id': current_last_id})}\n\n"
+                            last_heartbeat = current_time
+                        
+                        # Small delay to prevent busy waiting
+                        await asyncio.sleep(0.1)
+                
+                except RedisConnectionError:
+                    print("Redis connection lost, attempting to reconnect...")
+                    await asyncio.sleep(1)
+                    continue
+                except Exception as e:
+                    print(f"Error in SSE stream: {e}")
+                    yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
+                    await asyncio.sleep(1)
+        
+        except Exception as e:
+            print(f"Fatal error in SSE stream: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'content': f'Stream error: {str(e)}'})}\n\n"
+        
+        finally:
+            # Cleanup: Remove consumer from group
+            try:
+                await redis_client.xgroup_delconsumer(stream_name, consumer_group, consumer_name)
+                print(f"Cleaned up consumer {consumer_name}")
+            except Exception as cleanup_error:
+                print(f"Error cleaning up consumer: {cleanup_error}")
+    
+    return EventSourceResponse(event_stream())
+
+@app.post("/gemini/models/available")
+async def get_available_models():
+    for model in client.models.list():
+        print(f"  Name: {model.name}")
+    return {"models": [model.name for model in client.models.list()]}
+
+@app.get("/health")
+async def health():
+    """Health check endpoint"""
+    global redis_client
+    try:
+        # Test Redis connection
+        await redis_client.ping()
+        redis_status = "connected"
+    except Exception as e:
+        redis_status = f"error: {str(e)}"
+    
+    return {
+        "status": "healthy",
+        "redis": redis_status,
+        "timestamp": datetime.now().isoformat()
+    }
 
 if __name__ == "__main__":
     import uvicorn

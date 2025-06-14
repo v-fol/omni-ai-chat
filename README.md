@@ -10,6 +10,8 @@ Submission for the t3 chat cloneathon [https://cloneathon.t3.chat/](https://clon
 - [X] Message streaming
 - [X] Markdown support
 - [X] Ability to move input area to bottom/top/right of the screen
+- [X] Auto scroll / scroll to bottom on new message / no auto scroll toggle
+- [X] Chat navigation through conversation topics minimized to a sidebar
 - [ ] Audio input
 - [ ] Audio output
 - [ ] Image input
@@ -28,7 +30,7 @@ Submission for the t3 chat cloneathon [https://cloneathon.t3.chat/](https://clon
 
 - [X] Chat history persistence
 - [X] Chat history pagination
-- [ ] Structute chats in folders
+- [ ] Structute chats in folders / workspaces
 - [ ] Chat sharing with unique URLs
 - [ ] Message search functionality
 
@@ -46,3 +48,4 @@ Submission for the t3 chat cloneathon [https://cloneathon.t3.chat/](https://clon
 - [ ] Temporary chats (for one-time conversations)
 - [ ] Temporary inline chats (for quick questions)
 - [ ] Resumable streams
+- [ ] Local llms with langchain or similar
