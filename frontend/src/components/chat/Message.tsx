@@ -17,6 +17,8 @@ import sql from 'react-syntax-highlighter/dist/esm/languages/prism/sql';
 import golang from 'react-syntax-highlighter/dist/esm/languages/prism/go';
 import rust from 'react-syntax-highlighter/dist/esm/languages/prism/rust';
 import Markdown from 'react-markdown';
+import { TextShimmerWave } from '@/components/motion-primitives/text-shimmer-wave';
+
 
 import '../../markdown.css';
 
@@ -247,9 +249,15 @@ export function Message({ content, isUser, timestamp, model, completedAt, status
                 // fade out effect 
                 <>
                 <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t h-28 from-neutral-800 to-transparent " />
-                <span className="inline-block w-2 h-4 bg-neutral-500 dark:bg-neutral-400 ml-1 animate-pulse" />
                 </>
               )}
+              {/* Streaming text when before receiving the message */}
+              {isStreaming && !isUser && content.length === 0 && (
+
+                    <TextShimmerWave className='font-mono text-sm' duration={1}>
+                      Generating...
+                    </TextShimmerWave>
+                )}
             </div>
           </div>
         </div>

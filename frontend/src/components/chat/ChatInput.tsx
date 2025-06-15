@@ -1,4 +1,4 @@
-import { useRef, useCallback, memo } from 'react';
+import { useRef, useCallback, memo, forwardRef, useImperativeHandle } from 'react';
 import { cn } from '@/lib/utils';
 import { Search } from 'lucide-react';
 import { VoiceRecordButton } from './VoiceRecordButton';
@@ -14,11 +14,16 @@ interface ChatInputProps {
   inputWrapperClass?: string;
   inputHeight?: string;
   rows?: number;
+  isFloating?: boolean;
 }
 
-const ChatInput = memo(({
+export interface ChatInputRef {
+  setText: (text: string) => void;
+  focus: () => void;
+}
+
+const ChatInput = memo(forwardRef<ChatInputRef, ChatInputProps>(({
   onSendMessage,
-  onVoiceTranscription,
   isLoading,
   searchEnabled,
   theme,
@@ -26,9 +31,23 @@ const ChatInput = memo(({
   className,
   inputWrapperClass = '',
   inputHeight = '',
-  rows = 3
-}: ChatInputProps) => {
+  rows = 3,
+  isFloating = false
+}, ref) => {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useImperativeHandle(ref, () => ({
+    setText: (text: string) => {
+      if (textareaRef.current) {
+        textareaRef.current.value = text;
+      }
+    },
+    focus: () => {
+      if (textareaRef.current) {
+        textareaRef.current.focus();
+      }
+    }
+  }), []);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -43,14 +62,6 @@ const ChatInput = memo(({
     }
   }, [onSendMessage]);
 
-  const handleVoiceTranscription = useCallback((text: string) => {
-    if (textareaRef.current) {
-      textareaRef.current.value = text;
-      textareaRef.current.focus();
-    }
-    onVoiceTranscription(text);
-  }, [onVoiceTranscription]);
-
   const defaultPlaceholder = searchEnabled 
     ? "Type your message... (Google Search enabled)" 
     : "Type your message...";
@@ -60,12 +71,24 @@ const ChatInput = memo(({
       <textarea
         ref={textareaRef}
         className={cn(
-          "w-full p-2 pr-12 rounded-md resize-none border focus:outline-none focus:ring-2 focus:ring-accent-blue/50",
-          inputHeight,
-          searchEnabled && "border-blue-500 bg-blue-50/50 dark:bg-blue-950/20",
-          theme === 'dark' 
-            ? 'bg-background-dark-secondary text-text-light-primary border-border-dark' 
-            : 'bg-background-secondary text-text-primary border-border-light'
+          "w-full resize-none focus:outline-none transition-all duration-200",
+          isFloating ? (
+            cn(
+              "p-3 pr-12 bg-transparent border-0 focus:ring-0",
+              searchEnabled && "pl-16",
+              inputHeight || "min-h-[44px]",
+              theme === 'dark' ? 'text-neutral-100 placeholder:text-neutral-400' : 'text-neutral-900 placeholder:text-neutral-500'
+            )
+          ) : (
+            cn(
+              "p-2 pr-12 rounded-md border focus:ring-2 focus:ring-accent-blue/50",
+              inputHeight,
+              searchEnabled && "border-blue-500 bg-blue-50/50 dark:bg-blue-950/20",
+              theme === 'dark' 
+                ? 'bg-background-dark-secondary text-text-light-primary border-border-dark' 
+                : 'bg-background-secondary text-text-primary border-border-light'
+            )
+          )
         )}
         rows={rows}
         placeholder={placeholder || defaultPlaceholder}
@@ -73,21 +96,17 @@ const ChatInput = memo(({
         disabled={isLoading}
       />
       {searchEnabled && (
-        <div className="absolute left-2 top-2 flex items-center gap-1 text-xs text-blue-600 dark:text-blue-400">
+        <div className={cn(
+          "absolute flex items-center gap-1 text-xs text-blue-600 dark:text-blue-400",
+          isFloating ? "left-3 top-1/2 transform -translate-y-1/2" : "left-2 top-2"
+        )}>
           <Search className="w-3 h-3" />
           <span className="font-medium">Search</span>
         </div>
       )}
-      <div className="absolute right-2 top-2">
-        <VoiceRecordButton
-          onTranscriptionComplete={handleVoiceTranscription}
-          disabled={isLoading}
-          className="size-8"
-        />
-      </div>
     </div>
   );
-});
+}));
 
 ChatInput.displayName = 'ChatInput';
 
