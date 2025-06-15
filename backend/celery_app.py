@@ -27,7 +27,7 @@ celery_app.conf.update(
     # Performance optimizations
     result_expires=1800,  # 30 minutes instead of 1 hour
     task_routes={
-        "tasks.generate_ai_response": {"queue": "ai_generation"},
+        "tasks.generate_gemini_response": {"queue": "ai_generation"},
         "tasks.generate_openrouter_response": {"queue": "ai_generation"},
         "tasks.generate_github_response": {"queue": "ai_generation"},
     },

@@ -122,7 +122,7 @@ def init_worker_process(sender=None, **kwargs):
     print(f"✅ Database initialized for worker process {os.getpid()}")
 
 @celery_app.task(bind=True)
-def generate_ai_response(self, chat_id: str, user_email: str, enable_search: bool = False):
+def generate_gemini_response(self, chat_id: str, user_email: str, enable_search: bool = False, model_name: str = "gemini-2.0-flash"):
     """
     Generate AI response and stream chunks to Redis Streams.
     Uses Motor directly to avoid Beanie event loop conflicts.
@@ -136,7 +136,7 @@ def generate_ai_response(self, chat_id: str, user_email: str, enable_search: boo
         
         # Run the async function
         result = loop.run_until_complete(
-            _generate_ai_response_async(task_id, chat_id, user_email, enable_search)
+            _generate_gemini_response_async(task_id, chat_id, user_email, enable_search, model_name)
         )
         return result
             
@@ -263,7 +263,7 @@ def _count_tokens(text: str) -> int:
         # Fallback: rough estimation (1 token ≈ 4 characters)
         return len(text) // 4
 
-async def _generate_ai_response_async(task_id: str, chat_id: str, user_email: str, enable_search: bool = False):
+async def _generate_gemini_response_async(task_id: str, chat_id: str, user_email: str, enable_search: bool = False, model_name: str = "gemini-2.0-flash"):
     """
     Async implementation of AI response generation with Redis Streams.
     Uses Motor directly to avoid event loop conflicts.
@@ -324,7 +324,7 @@ async def _generate_ai_response_async(task_id: str, chat_id: str, user_email: st
             "chat_id": chat_id,
             "from_user": False,
             "content": "",
-            "model": "gemini-2.0-flash" + (" + Google Search" if enable_search else ""),
+            "model": model_name + (" + Google Search" if enable_search else ""),
             "created_at": datetime.now(),
             "status": "streaming",
             "is_complete": False,
@@ -350,7 +350,7 @@ async def _generate_ai_response_async(task_id: str, chat_id: str, user_email: st
             
             # Generate streaming response from Gemini with Google Search
             response = gemini_client.models.generate_content_stream(
-                model="gemini-2.0-flash",
+                model=model_name,
                 contents=gemini_contents,
                 config=GenerateContentConfig(
                     tools=[google_search_tool],
@@ -360,7 +360,7 @@ async def _generate_ai_response_async(task_id: str, chat_id: str, user_email: st
         else:
             # Generate streaming response from Gemini without search
             response = gemini_client.models.generate_content_stream(
-                model="gemini-2.0-flash",
+                model=model_name,
                 contents=gemini_contents
             )
         

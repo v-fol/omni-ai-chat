@@ -269,7 +269,7 @@ export function Message({ content, isUser, timestamp, model, completedAt, status
           </span>
 
           {/* Model */}
-          {model && (
+          {!isUser && model && (
             <>
               <span>•</span>
               <span>{model}</span>

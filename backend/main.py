@@ -22,7 +22,7 @@ import time
 import httpx
 
 from db.engine import User, Chat, Message, init as init_db
-from tasks import generate_ai_response, generate_openrouter_response, generate_github_response, _count_tokens
+from tasks import generate_gemini_response, generate_openrouter_response, generate_github_response, _count_tokens
 
 # Load environment variables
 load_dotenv()
@@ -309,8 +309,8 @@ async def send_message_to_chat(chat_id: str, request: Request, body: SendMessage
     
     # Route to appropriate task based on provider
     if body.provider == "google":
-        task = generate_ai_response.delay(chat_id, user.email, body.enable_search)
-        print(f"Enqueued Gemini task {task.id} for chat {chat_id} (search: {body.enable_search})")
+        task = generate_gemini_response.delay(chat_id, user.email, body.enable_search, body.model)
+        print(f"Enqueued Gemini task {task.id} for chat {chat_id} (search: {body.enable_search}, model: {body.model})")
         search_enabled = body.enable_search
     elif body.provider == "openrouter":
         task = generate_openrouter_response.delay(chat_id, user.email, body.model)
@@ -505,18 +505,26 @@ async def get_all_available_models():
     try:
         gemini_models = [
             {
+                "id": "gemini-2.5-flash-preview-05-20",
+                "name": "Gemini 2.5 Flash",
+                "provider": "google",
+                "supports_search": False,
+                "description": "Google's latest multimodal AI model"
+            },
+
+            {
                 "id": "gemini-2.0-flash",
                 "name": "Gemini 2.0 Flash",
                 "provider": "google",
                 "supports_search": True,
-                "description": "Google's latest multimodal AI model"
+                "description": "Google's older multimodal AI model"
             },
             {
-                "id": "gemini-1.5-pro",
-                "name": "Gemini 1.5 Pro",
+                "id": "gemini-2.0-flash-lite",
+                "name": "Gemini 2.0 Flash Lite",
                 "provider": "google", 
                 "supports_search": True,
-                "description": "Google's advanced reasoning model"
+                "description": "Google's older lightweight multimodal AI model"
             }
         ]
         models.extend(gemini_models)
