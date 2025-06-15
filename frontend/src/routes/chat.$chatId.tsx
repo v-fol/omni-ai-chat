@@ -7,7 +7,7 @@ import { cn } from '@/lib/utils';
 import { useTheme } from '@/lib/theme-context';
 import { chatPositionAtom, isAutoScrollAtom, chatMessagesAtom, isLoadingAtom, userAtom, sidebarCollapsedAtom, searchEnabledAtom, selectedModelAtom } from '@/lib/atoms';
 import type { Message as MessageType } from '@/lib/atoms';
-import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
+import { useEffect, useRef, useState, useCallback, useMemo, memo } from 'react';
 import { ChatEventSource, sendChatMessage } from '@/lib/eventsource';
 import { LayoutGrid, ArrowDown, Sun, Moon, Clock, User, Bot, Hash, Search } from 'lucide-react';
 import { Message } from '@/components/chat/Message';
@@ -17,6 +17,7 @@ import Markdown from 'react-markdown';
 import { Switch } from '@/components/ui/switch';
 import { VoiceRecordButton } from '@/components/chat/VoiceRecordButton';
 import { ModelSelector } from '@/components/chat/ModelSelector';
+import { ChatInput } from '@/components/chat/ChatInput';
 
 const layoutConfig = {
   bottom: {
@@ -68,7 +69,6 @@ function ChatComponent() {
   const [selectedModel] = useAtom(selectedModelAtom);
   const { data: chatData } = useChat(chatId);
   
-  const [inputValue, setInputValue] = useState('');
   const [spacerHeight, setSpacerHeight] = useState(0);
   const [userScrolledManually, setUserScrolledManually] = useState(false);
   const [shouldMonitorScrolls, setShouldMonitorScrolls] = useState(false);
@@ -83,8 +83,11 @@ function ChatComponent() {
         content: msg.content,
         isUser: msg.from_user,
         timestamp: new Date(msg.created_at),
+        model: msg.model,
+        completedAt: msg.completed_at ? new Date(msg.completed_at) : undefined,
         status: msg.status,
         isComplete: msg.is_complete,
+        tokens: msg.tokens // Include token count from database
       }));
       
       // Merge with existing messages to avoid overwriting optimistic updates
@@ -302,22 +305,26 @@ function ChatComponent() {
     };
   }, [chatId, user]);
 
-  const handleSendMessage = async (messageText?: string) => {
-    const textToSend = messageText || inputValue.trim();
+  const handleSendMessage = useCallback(async (messageText: string) => {
+    const textToSend = messageText.trim();
     if (!textToSend || isLoading) return;
+
+    // Generate a unique temp ID for tracking this message
+    const tempId = `temp-${Date.now()}`;
 
     // Optimistically add the user's message to the UI
     const optimisticMessage: MessageType = {
       content: textToSend,
       isUser: true,
       timestamp: new Date(),
+      model: selectedModel.id,
       status: 'complete',
       isComplete: true,
-      tempId: `temp-${Date.now()}` // Add temporary ID for tracking
+      tempId: tempId, // Add temporary ID for tracking,
+      tokens: 0
     };
     setMessages(prev => [...prev, optimisticMessage]);
     setIsLoading(true); // Start loading for AI response
-    if (!messageText) setInputValue(''); // Clear input immediately only if not from initial message
 
     // Send message via HTTP API with model and search options
     const result = await sendChatMessage(
@@ -325,25 +332,35 @@ function ChatComponent() {
       textToSend, 
       searchEnabled && selectedModel.supports_search, // Only enable search if model supports it
       selectedModel.id,
-      selectedModel.provider
+      selectedModel.provider,
     );
     
     if (!result.success) {
       console.error("Failed to send message:", result.error);
       // Revert optimistic updates
-      setMessages(prev => prev.slice(0, -1));
+      setMessages(prev => prev.filter(msg => msg.tempId !== tempId));
       setIsLoading(false);
       setSpacerHeight(0);
       alert(`Failed to send message: ${result.error}`);
     } else {
+      // Update the user message with the specific tempId with token count from API
+      console.log('API Response tokens:', result.tokens);
+      if (result.tokens !== undefined && result.tokens > 0) {
+        setMessages(prev => {
+          const updated = prev.map(msg => 
+            msg.tempId === tempId ? { ...msg, tokens: result.tokens } : msg
+          );
+          console.log('Updated user message with tokens:', updated.find(msg => msg.tempId === tempId));
+          return updated;
+        });
+      }
       console.log(`Message sent successfully, task ID: ${result.taskId}, model: ${result.model}, provider: ${result.provider}`);
     }
-  };
+  }, [chatId, isLoading, selectedModel, searchEnabled, setMessages, setIsLoading, setSpacerHeight]);
 
-  const handleVoiceTranscription = (transcribedText: string) => {
-    // Insert transcribed text into the input field for user to edit
-    setInputValue(transcribedText);
-  };
+  const handleVoiceTranscription = useCallback((transcribedText: string) => {
+    // This is now handled by the ChatInput component directly
+  }, []);
 
   const handleSSEStart = (messageId: string) => {
     console.log('AI response started, message ID:', messageId);
@@ -352,6 +369,7 @@ function ChatComponent() {
       content: '',
       isUser: false,
       timestamp: new Date(),
+      model: selectedModel.id,
       status: 'streaming',
       isComplete: false
     };
@@ -373,21 +391,24 @@ function ChatComponent() {
         content: text, 
         isUser: false, 
         timestamp: new Date(), 
+        model: selectedModel.id,
         status: 'streaming',
         isComplete: false
       }];
     });
   };
 
-  const handleSSEComplete = (messageId: string, totalChunks?: number) => {
-    console.log('Message generation complete:', messageId, 'Total chunks:', totalChunks);
+  const handleSSEComplete = (messageId: string, totalChunks?: number, tokens?: number, completedAt?: Date) => {
+    console.log('Message generation complete:', messageId, 'Total chunks:', totalChunks, 'Tokens:', tokens, 'Completed at:', completedAt);
     setIsLoading(false);
     setSpacerHeight(0);
     setMessages(prev => prev.map((m, i) => 
       i === prev.length - 1 ? { 
         ...m, 
         status: 'complete', 
-        isComplete: true 
+        isComplete: true,
+        tokens: tokens, // Store token count in the message
+        completedAt: completedAt // Store completion timestamp
       } : m
     ));
   };
@@ -403,13 +424,6 @@ function ChatComponent() {
         isComplete: false
       } : m
     ));
-  };
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSendMessage();
-    }
   };
 
   const handlePositionChange = () => {
@@ -485,35 +499,16 @@ function ChatComponent() {
   );
 
   const input = (
-    <div className={cn(config.inputWrapperClass, config.inputHeight, "relative")}>
-      <textarea
-        className={cn(
-          "w-full p-2 pr-12 rounded-md resize-none border focus:outline-none focus:ring-2 focus:ring-accent-blue/50",
-          config.inputHeight,
-          searchEnabled && "border-blue-500 bg-blue-50/50 dark:bg-blue-950/20",
-          theme === 'dark' ? 'bg-background-dark-secondary text-text-light-primary border-border-dark' : 'bg-background-secondary text-text-primary border-border-light'
-        )}
-        rows={config.inputRows}
-        placeholder={searchEnabled ? "Type your message... (Google Search enabled)" : "Type your message..."}
-        value={inputValue}
-        onChange={(e) => setInputValue(e.target.value)}
-        onKeyDown={handleKeyDown}
-        disabled={isLoading}
-      />
-      {searchEnabled && (
-        <div className="absolute left-2 top-2 flex items-center gap-1 text-xs text-blue-600 dark:text-blue-400">
-          <Search className="w-3 h-3" />
-          <span className="font-medium">Search</span>
-        </div>
-      )}
-      <div className="absolute right-2 top-2">
-        <VoiceRecordButton
-          onTranscriptionComplete={handleVoiceTranscription}
-          disabled={isLoading}
-          className="size-8"
-        />
-      </div>
-    </div>
+    <ChatInput
+      onSendMessage={handleSendMessage}
+      onVoiceTranscription={handleVoiceTranscription}
+      isLoading={isLoading}
+      searchEnabled={searchEnabled}
+      theme={theme}
+      inputWrapperClass={config.inputWrapperClass}
+      inputHeight={config.inputHeight}
+      rows={config.inputRows}
+    />
   );
   
   // Chat Navigation Component
@@ -743,6 +738,9 @@ function ChatComponent() {
                   {...message}
                   isUser={message.isUser}
                   timestamp={message.timestamp}
+                  model={message.model}
+                  completedAt={message.completedAt}
+                  tokens={message.tokens}
                 />
               </div>
             ))}

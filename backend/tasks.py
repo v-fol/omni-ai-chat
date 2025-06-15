@@ -15,6 +15,7 @@ from functools import lru_cache
 import threading
 import motor.motor_asyncio
 from bson import ObjectId
+import tiktoken
 
 from celery_app import celery_app
 
@@ -249,6 +250,19 @@ def _build_openai_conversation(messages):
     
     return openai_messages
 
+def _count_tokens(text: str) -> int:
+    """
+    Count tokens using tiktoken with default encoding.
+    Simple and good enough for all models.
+    """
+    try:
+        encoding = tiktoken.get_encoding("cl100k_base")
+        return len(encoding.encode(text))
+    except Exception as e:
+        print(f"Error counting tokens: {e}")
+        # Fallback: rough estimation (1 token ≈ 4 characters)
+        return len(text) // 4
+
 async def _generate_ai_response_async(task_id: str, chat_id: str, user_email: str, enable_search: bool = False):
     """
     Async implementation of AI response generation with Redis Streams.
@@ -313,7 +327,8 @@ async def _generate_ai_response_async(task_id: str, chat_id: str, user_email: st
             "model": "gemini-2.0-flash" + (" + Google Search" if enable_search else ""),
             "created_at": datetime.now(),
             "status": "streaming",
-            "is_complete": False
+            "is_complete": False,
+            "tokens": 0  # Will be updated when response is complete
         }
         result = await db.messages.insert_one(ai_message_doc)
         message_id = result.inserted_id
@@ -378,12 +393,17 @@ async def _generate_ai_response_async(task_id: str, chat_id: str, user_email: st
                     await asyncio.sleep(0.001)
         
         # Final updates using Motor directly
+        tokens = _count_tokens(full_content)
+        completion_time = datetime.now()
+        
         await db.messages.update_one(
             {"_id": message_id},
             {"$set": {
                 "content": full_content,
                 "status": "complete",
-                "is_complete": True
+                "is_complete": True,
+                "tokens": tokens,
+                "completed_at": completion_time
             }}
         )
         
@@ -393,7 +413,7 @@ async def _generate_ai_response_async(task_id: str, chat_id: str, user_email: st
             {"$set": {"updated_at": datetime.now()}}
         )
         
-        # Send completion signal
+        # Send completion signal with token count
         await redis_async_client.xadd(stream_name, {
             "type": "complete",
             "message_id": str(message_id),
@@ -402,17 +422,20 @@ async def _generate_ai_response_async(task_id: str, chat_id: str, user_email: st
             "total_chunks": sequence,
             "final_length": len(full_content),
             "search_enabled": str(enable_search),
+            "tokens": str(tokens),
+            "completed_at": completion_time.isoformat(),
             "timestamp": datetime.now().isoformat()
         })
         
-        print(f"✅ Completed AI response with {sequence} chunks in task {task_id} (search: {enable_search})")
+        print(f"✅ Completed AI response with {sequence} chunks in task {task_id} (search: {enable_search}, tokens: {tokens})")
         
         return {
             "status": "complete",
             "message_id": str(message_id),
             "content": full_content,
             "total_chunks": sequence,
-            "search_enabled": enable_search
+            "search_enabled": enable_search,
+            "tokens": tokens
         }
         
     except Exception as e:
@@ -495,7 +518,6 @@ async def _generate_openrouter_response_async(task_id: str, chat_id: str, user_e
         # Build conversation context for OpenAI format
         openai_messages = _build_openai_conversation(messages)
         
-
         # Create AI message record using Motor directly
         ai_message_doc = {
             "chat_id": chat_id,
@@ -504,7 +526,8 @@ async def _generate_openrouter_response_async(task_id: str, chat_id: str, user_e
             "model": model_name,
             "created_at": datetime.now(),
             "status": "streaming",
-            "is_complete": False
+            "is_complete": False,
+            "tokens": 0  # Will be updated when response is complete
         }
         result = await db.messages.insert_one(ai_message_doc)
         message_id = result.inserted_id
@@ -565,12 +588,17 @@ async def _generate_openrouter_response_async(task_id: str, chat_id: str, user_e
                     await asyncio.sleep(0.001)
         
         # Final updates using Motor directly
+        tokens = _count_tokens(full_content)
+        completion_time = datetime.now()
+        
         await db.messages.update_one(
             {"_id": message_id},
             {"$set": {
                 "content": full_content,
                 "status": "complete",
-                "is_complete": True
+                "is_complete": True,
+                "tokens": tokens,
+                "completed_at": completion_time
             }}
         )
         
@@ -580,7 +608,7 @@ async def _generate_openrouter_response_async(task_id: str, chat_id: str, user_e
             {"$set": {"updated_at": datetime.now()}}
         )
         
-        # Send completion signal
+        # Send completion signal with token count
         await redis_async_client.xadd(stream_name, {
             "type": "complete",
             "message_id": str(message_id),
@@ -589,17 +617,20 @@ async def _generate_openrouter_response_async(task_id: str, chat_id: str, user_e
             "total_chunks": sequence,
             "final_length": len(full_content),
             "model": model_name,
+            "tokens": str(tokens),
+            "completed_at": completion_time.isoformat(),
             "timestamp": datetime.now().isoformat()
         })
         
-        print(f"✅ Completed OpenRouter response with {sequence} chunks in task {task_id} (model: {model_name})")
+        print(f"✅ Completed OpenRouter response with {sequence} chunks in task {task_id} (model: {model_name}, tokens: {tokens})")
         
         return {
             "status": "complete",
             "message_id": str(message_id),
             "content": full_content,
             "total_chunks": sequence,
-            "model": model_name
+            "model": model_name,
+            "tokens": tokens
         }
         
     except Exception as e:
@@ -682,7 +713,6 @@ async def _generate_github_response_async(task_id: str, chat_id: str, user_email
         # Build conversation context for OpenAI format
         openai_messages = _build_openai_conversation(messages)
         
-
         # Create AI message record using Motor directly
         ai_message_doc = {
             "chat_id": chat_id,
@@ -691,7 +721,8 @@ async def _generate_github_response_async(task_id: str, chat_id: str, user_email
             "model": model_name,
             "created_at": datetime.now(),
             "status": "streaming",
-            "is_complete": False
+            "is_complete": False,
+            "tokens": 0  # Will be updated when response is complete
         }
         result = await db.messages.insert_one(ai_message_doc)
         message_id = result.inserted_id
@@ -750,12 +781,17 @@ async def _generate_github_response_async(task_id: str, chat_id: str, user_email
                     await asyncio.sleep(0.001)
         
         # Final updates using Motor directly
+        tokens = _count_tokens(full_content)
+        completion_time = datetime.now()
+        
         await db.messages.update_one(
             {"_id": message_id},
             {"$set": {
                 "content": full_content,
                 "status": "complete",
-                "is_complete": True
+                "is_complete": True,
+                "tokens": tokens,
+                "completed_at": completion_time
             }}
         )
         
@@ -765,7 +801,7 @@ async def _generate_github_response_async(task_id: str, chat_id: str, user_email
             {"$set": {"updated_at": datetime.now()}}
         )
         
-        # Send completion signal
+        # Send completion signal with token count
         await redis_async_client.xadd(stream_name, {
             "type": "complete",
             "message_id": str(message_id),
@@ -774,17 +810,20 @@ async def _generate_github_response_async(task_id: str, chat_id: str, user_email
             "total_chunks": sequence,
             "final_length": len(full_content),
             "model": model_name,
+            "tokens": str(tokens),
+            "completed_at": completion_time.isoformat(),
             "timestamp": datetime.now().isoformat()
         })
         
-        print(f"✅ Completed GitHub response with {sequence} chunks in task {task_id} (model: {model_name})")
+        print(f"✅ Completed GitHub response with {sequence} chunks in task {task_id} (model: {model_name}, tokens: {tokens})")
         
         return {
             "status": "complete",
             "message_id": str(message_id),
             "content": full_content,
             "total_chunks": sequence,
-            "model": model_name
+            "model": model_name,
+            "tokens": tokens
         }
         
     except Exception as e:

@@ -22,7 +22,7 @@ import time
 import httpx
 
 from db.engine import User, Chat, Message, init as init_db
-from tasks import generate_ai_response, generate_openrouter_response, generate_github_response
+from tasks import generate_ai_response, generate_openrouter_response, generate_github_response, _count_tokens
 
 # Load environment variables
 load_dotenv()
@@ -248,13 +248,7 @@ async def get_chat(chat_id: str, request: Request):
         "id": str(chat.id),
         "title": chat.title,
         "updated_at": chat.updated_at,
-        "messages": [{
-            "content": msg.content,
-            "from_user": msg.from_user,
-            "created_at": msg.created_at,
-            "status": msg.status,
-            "is_complete": msg.is_complete
-        } for msg in messages]
+        "messages": messages
     }
 
 @app.delete("/chat/{chat_id}")
@@ -300,59 +294,44 @@ async def send_message_to_chat(chat_id: str, request: Request, body: SendMessage
     chat = await Chat.get(chat_id)
     if not chat or chat.user_id != str(user.id):
         raise HTTPException(status_code=404, detail="Chat not found")
-    
+
+    tokens = _count_tokens(body.message)
     # Save user message
     user_message = Message(
         chat_id=chat_id,
         from_user=True,
         content=body.message,
         model="user",
-        created_at=datetime.now()
+        created_at=datetime.now(),
+        tokens=tokens
     )
     await user_message.insert()
     
     # Route to appropriate task based on provider
     if body.provider == "google":
-        # Enqueue Celery task for Gemini AI response generation with optional search
         task = generate_ai_response.delay(chat_id, user.email, body.enable_search)
-        print(f"Enqueued Gemini AI response task {task.id} for chat {chat_id} (search: {body.enable_search})")
-        
-        return {
-            "message": "Message sent successfully",
-            "task_id": task.id,
-            "user_message_id": str(user_message.id),
-            "search_enabled": body.enable_search,
-            "model": body.model,
-            "provider": body.provider
-        }
+        print(f"Enqueued Gemini task {task.id} for chat {chat_id} (search: {body.enable_search})")
+        search_enabled = body.enable_search
     elif body.provider == "openrouter":
-        # Enqueue Celery task for OpenRouter AI response generation
         task = generate_openrouter_response.delay(chat_id, user.email, body.model)
-        print(f"Enqueued OpenRouter AI response task {task.id} for chat {chat_id} (model: {body.model})")
-        
-        return {
-            "message": "Message sent successfully",
-            "task_id": task.id,
-            "user_message_id": str(user_message.id),
-            "search_enabled": False,  # OpenRouter doesn't support search yet
-            "model": body.model,
-            "provider": body.provider
-        }
+        print(f"Enqueued OpenRouter task {task.id} for chat {chat_id} (model: {body.model})")
+        search_enabled = False
     elif body.provider == "github":
-        # Enqueue Celery task for GitHub AI response generation
         task = generate_github_response.delay(chat_id, user.email, body.model)
-        print(f"Enqueued GitHub AI response task {task.id} for chat {chat_id} (model: {body.model})")
-        
-        return {
-            "message": "Message sent successfully",
-            "task_id": task.id,
-            "user_message_id": str(user_message.id),
-            "search_enabled": False,  # GitHub doesn't support search
-            "model": body.model,
-            "provider": body.provider
-        }
+        print(f"Enqueued GitHub task {task.id} for chat {chat_id} (model: {body.model})")
+        search_enabled = False
     else:
         raise HTTPException(status_code=400, detail=f"Unsupported provider: {body.provider}")
+    
+    return {
+        "message": "Message sent successfully",
+        "task_id": task.id,
+        "user_message_id": str(user_message.id),
+        "search_enabled": search_enabled,
+        "model": body.model,
+        "provider": body.provider,
+        "tokens": tokens
+    }
 
 @app.get("/sse/chat/{chat_id}")
 async def stream_chat_messages(

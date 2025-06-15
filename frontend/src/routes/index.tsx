@@ -5,12 +5,12 @@ import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip
 import { cn } from '@/lib/utils';
 import { useTheme } from '@/lib/theme-context';
 import { chatPositionAtom, isAutoScrollAtom, isLoadingAtom, searchEnabledAtom, selectedModelAtom } from '@/lib/atoms';
-import { useState } from 'react';
+import { useCallback } from 'react';
 import { LayoutGrid, ArrowDown, Sun, Moon, Search } from 'lucide-react';
 import { useCreateChat } from '@/lib/queries';
 import { Switch } from '@/components/ui/switch';
-import { VoiceRecordButton } from '@/components/chat/VoiceRecordButton';
 import { ModelSelector } from '@/components/chat/ModelSelector';
+import { ChatInput } from '@/components/chat/ChatInput';
 
 const layoutConfig = {
   bottom: { inputWrapperClass: 'pl-0 pb-1 pt-2 pr-4', controlsWrapperClass: 'flex flex-col items-center gap-2 p-2', inputRows: 3, inputHeight: '' },
@@ -24,46 +24,32 @@ export const Route = createFileRoute('/')({
 
 function NewChatComponent() {
   const navigate = useNavigate();
-  const createChatMutation = useCreateChat();
-
-  const [inputValue, setInputValue] = useState('');
-  const [searchEnabled, setSearchEnabled] = useAtom(searchEnabledAtom);
-  const [selectedModel] = useAtom(selectedModelAtom);
   const [chatPosition, setChatPosition] = useAtom(chatPositionAtom);
   const [isAutoScroll, setIsAutoScroll] = useAtom(isAutoScrollAtom);
-  const [isLoading, setIsLoading] = useAtom(isLoadingAtom);
   const { theme, toggleTheme } = useTheme();
-
-  const handleSendMessage = () => {
-    if (!inputValue.trim() || createChatMutation.isPending) return;
+  const [isLoading, setIsLoading] = useAtom(isLoadingAtom);
+  const [searchEnabled, setSearchEnabled] = useAtom(searchEnabledAtom);
+  const [selectedModel] = useAtom(selectedModelAtom);
+  const createChatMutation = useCreateChat();
+  
+  const handleSendMessage = useCallback((message: string) => {
+    if (!message.trim() || createChatMutation.isPending) return;
     
-    createChatMutation.mutate(inputValue.trim(), {
-      onSuccess: (newChat) => {
-        navigate({
-          to: '/chat/$chatId',
-          params: { chatId: newChat.id },
-          state: { firstMessage: inputValue.trim() }
+    createChatMutation.mutate(message, {
+      onSuccess: (data) => {
+        navigate({ 
+          to: '/chat/$chatId', 
+          params: { chatId: data.id },
+          state: { firstMessage: message }
         });
       },
       onError: (error) => {
-        console.error("Failed to create chat:", error);
-        alert("Could not start a new chat. Please try again.");
-      },
+        console.error('Failed to create chat:', error);
+        alert('Failed to create chat. Please try again.');
+      }
     });
-  };
+  }, [createChatMutation, navigate]);
 
-  const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSendMessage();
-    }
-  };
-
-  const handleVoiceTranscription = (transcribedText: string) => {
-    // Insert transcribed text into the input field for user to edit
-    setInputValue(transcribedText);
-  };
-  
   const handlePositionChange = () => {
     const positions = Object.keys(layoutConfig) as (keyof typeof layoutConfig)[];
     const currentIndex = positions.indexOf(chatPosition);
@@ -123,39 +109,21 @@ function NewChatComponent() {
   );
 
   const input = (
-    <div className={cn(config.inputWrapperClass, config.inputHeight, "relative")}>
-      <textarea
-        className={cn(
-          "w-full p-2 pr-12 rounded-md resize-none border focus:outline-none focus:ring-2 focus:ring-accent-blue/50", 
-          config.inputHeight, 
-          searchEnabled && selectedModel.supports_search && "border-blue-500 bg-blue-50/50 dark:bg-blue-950/20",
-          theme === 'dark' ? 'bg-background-dark-secondary text-text-light-primary border-border-dark' : 'bg-background-secondary text-text-primary border-border-light'
-        )}
-        rows={config.inputRows}
-        placeholder={
-          searchEnabled && selectedModel.supports_search 
-            ? "Type a message to start a new chat... (Google Search enabled)" 
-            : "Type a message to start a new chat..."
-        }
-        value={inputValue}
-        onChange={(e) => setInputValue(e.target.value)}
-        onKeyPress={handleKeyPress}
-        disabled={createChatMutation.isPending}
-      />
-      {searchEnabled && selectedModel.supports_search && (
-        <div className="absolute left-2 top-2 flex items-center gap-1 text-xs text-blue-600 dark:text-blue-400">
-          <Search className="w-3 h-3" />
-          <span className="font-medium">Search</span>
-        </div>
-      )}
-      <div className="absolute right-6 top-4">
-        <VoiceRecordButton
-          onTranscriptionComplete={handleVoiceTranscription}
-          disabled={createChatMutation.isPending}
-          className="size-8"
-        />
-      </div>
-    </div>
+    <ChatInput
+      onSendMessage={handleSendMessage}
+      onVoiceTranscription={() => {}}
+      isLoading={createChatMutation.isPending}
+      searchEnabled={searchEnabled && selectedModel.supports_search}
+      theme={theme}
+      placeholder={
+        searchEnabled && selectedModel.supports_search 
+          ? "Type a message to start a new chat... (Google Search enabled)" 
+          : "Type a message to start a new chat..."
+      }
+      inputWrapperClass={config.inputWrapperClass}
+      inputHeight={config.inputHeight}
+      rows={config.inputRows}
+    />
   );
   
   return (

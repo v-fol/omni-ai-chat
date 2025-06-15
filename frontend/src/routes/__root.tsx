@@ -8,7 +8,7 @@ export const Route = createRootRoute({
       <ChatLayout>
         <Outlet />
       </ChatLayout>
-      <TanStackRouterDevtools />
+      {/* <TanStackRouterDevtools /> */}
     </>
   ),
 }) 

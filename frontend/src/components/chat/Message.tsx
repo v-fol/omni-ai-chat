@@ -38,8 +38,11 @@ interface MessageProps {
   content: string;
   isUser: boolean;
   timestamp: Date;
+  model: string;
+  completedAt?: Date; // When the message was completed (for AI messages)
   status?: 'complete' | 'incomplete' | 'streaming';
   isComplete?: boolean;
+  tokens?: number; // Token count for this message
 }
 
 interface CustomCodeProps extends React.HTMLAttributes<HTMLElement> {
@@ -48,13 +51,25 @@ interface CustomCodeProps extends React.HTMLAttributes<HTMLElement> {
   children?: React.ReactNode;
 }
 
-export function Message({ content, isUser, timestamp, status, isComplete }: MessageProps) {
+export function Message({ content, isUser, timestamp, model, completedAt, status, isComplete, tokens }: MessageProps) {
   const { theme } = useTheme();
   const [copiedStates, setCopiedStates] = useState<Record<string, boolean>>({});
   const [displayedContent, setDisplayedContent] = useState('');
   const [containerHeight, setContainerHeight] = useState<number | undefined>(undefined);
   const contentRef = useRef<HTMLDivElement>(null);
   const isStreaming = status === 'streaming';
+
+  // Calculate tokens per second for AI messages
+  const tokensPerSecond = useMemo(() => {
+    if (!tokens || isUser || !completedAt || !timestamp) return undefined;
+    
+    const durationMs = completedAt.getTime() - timestamp.getTime();
+    const durationSeconds = durationMs / 1000;
+    
+    if (durationSeconds <= 0) return undefined;
+    
+    return Math.round((tokens / durationSeconds) * 10) / 10; // Round to 1 decimal place
+  }, [tokens, isUser, completedAt, timestamp]);
 
   // Smooth content streaming with height animation
   useEffect(() => {
@@ -253,9 +268,37 @@ export function Message({ content, isUser, timestamp, status, isComplete }: Mess
             })}
           </span>
 
+          {/* Model */}
+          {model && (
+            <>
+              <span>•</span>
+              <span>{model}</span>
+            </>
+          )}
+
+          {/* Token count - only show for AI messages with token data */}
+          {tokens !== undefined && (
+            <>
+              <span>•</span>
+              <span title={`${tokens} tokens${tokensPerSecond ? ` at ${tokensPerSecond} tokens/sec` : ''}`}>
+                {tokens} tokens{tokensPerSecond ? ` (${tokensPerSecond} tokens/sec)` : ''}
+              </span>
+            </>
+          )}
+
+          {/* Time to complete */}
+          {completedAt && (
+            <>
+              <span>•</span>
+              <span>
+                {Math.round((completedAt.getTime() - timestamp.getTime()) / 10) / 100}s
+              </span>
+            </>
+          )}
+          
+
           {/* Action buttons - only show on hover */}
           <div className="flex gap-1">
-            {!isUser && (
               <button
                 className="p-1 hover:text-neutral-300 rounded transition-colors duration-200"
                 title="Copy message"
@@ -267,7 +310,6 @@ export function Message({ content, isUser, timestamp, status, isComplete }: Mess
                   <CopyIcon className="w-3 h-3" />
                 )}
               </button>
-            )}
           </div>
         </div>
       </div>
