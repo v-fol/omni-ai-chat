@@ -18,7 +18,7 @@ class Message(Document):
     created_at: datetime = Field(default_factory=datetime.now)
     completed_at: Optional[datetime] = None  # When the message was completed (for AI messages)
     is_complete: bool = True  # False for interrupted AI responses
-    status: str = "complete"  # can be "complete", "incomplete", "streaming"
+    status: str = "complete"  # can be "complete", "incomplete", "streaming", "terminated"
     tokens: int = 0  # Token count for this message
 
     class Settings:

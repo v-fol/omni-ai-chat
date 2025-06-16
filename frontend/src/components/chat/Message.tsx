@@ -42,7 +42,7 @@ interface MessageProps {
   timestamp: Date;
   model: string;
   completedAt?: Date; // When the message was completed (for AI messages)
-  status?: 'complete' | 'incomplete' | 'streaming';
+  status?: 'complete' | 'incomplete' | 'streaming' | 'terminated';
   isComplete?: boolean;
   tokens?: number; // Token count for this message
 }
@@ -75,8 +75,8 @@ export function Message({ content, isUser, timestamp, model, completedAt, status
 
   // Smooth content streaming with height animation
   useEffect(() => {
-    if (isUser || status === 'complete') {
-      // For user messages or completed AI messages, show everything immediately
+    if (isUser || status === 'complete' || status === 'terminated') {
+      // For user messages, completed AI messages, or terminated messages, show everything immediately
       setDisplayedContent(content);
       setContainerHeight(undefined); // Let it be auto
       return;
@@ -346,6 +346,14 @@ export function Message({ content, isUser, timestamp, model, completedAt, status
         <div className="absolute top-2 right-2 flex items-center text-sm text-red-500">
           <span className="mr-1">⚠️</span>
           <span>Message incomplete</span>
+        </div>
+      )}
+
+      {/* Status indicator for terminated messages */}
+      {!isUser && status === 'terminated' && (
+        <div className="absolute top-2 right-2 flex items-center text-sm text-orange-500">
+          <span className="mr-1">🛑</span>
+          <span>Generation stopped</span>
         </div>
       )}
     </div>

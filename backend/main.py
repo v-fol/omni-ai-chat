@@ -22,7 +22,7 @@ import time
 import httpx
 
 from db.engine import User, Chat, Message, init as init_db
-from tasks import generate_gemini_response, generate_openrouter_response, generate_github_response, _count_tokens
+from tasks import generate_gemini_response, generate_openrouter_response, generate_github_response, _count_tokens, set_task_cancelled
 
 # Load environment variables
 load_dotenv()
@@ -101,6 +101,9 @@ class SendMessageRequest(BaseModel):
     enable_search: bool = False
     model: str = "gemini-2.0-flash"  # Default to Gemini
     provider: str = "google"  # Default to Google
+
+class TerminateTaskRequest(BaseModel):
+    task_id: str
 
 class VoiceTranscriptionRequest(BaseModel):
     audio_data: str  # Base64 encoded audio data
@@ -951,6 +954,66 @@ async def transcribe_voice(request: Request, body: VoiceTranscriptionRequest):
     except Exception as e:
         print(f"Voice transcription error: {e}")
         raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
+
+@app.post("/chat/{chat_id}/terminate")
+async def terminate_chat_generation(chat_id: str, request: Request, body: TerminateTaskRequest):
+    """
+    Terminate a running AI generation task and update message status.
+    """
+    user = await get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    # Verify chat ownership
+    chat = await Chat.get(chat_id)
+    if not chat or chat.user_id != str(user.id):
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    try:
+        # Set the cancellation flag for cooperative cancellation
+        set_task_cancelled(body.task_id)
+        print(f"Set cancellation flag for task {body.task_id}")
+        
+        # Find the most recent AI message that's streaming
+        latest_message = await Message.find(
+            Message.chat_id == chat_id,
+            Message.from_user == False,
+            Message.status == "streaming"
+        ).sort(-Message.created_at).limit(1).to_list()
+        
+        if latest_message:
+            # Update message status to terminated
+            message = latest_message[0]
+            message.status = "terminated"
+            message.is_complete = False
+            await message.save()
+            print(f"Updated message {message.id} status to terminated")
+        
+        # Clean up Redis stream
+        global redis_client
+        stream_name = f"chat:{chat_id}:stream"
+        try:
+            # Send termination signal to stream using the global async Redis client
+            await redis_client.xadd(stream_name, {
+                "type": "terminated",
+                "task_id": body.task_id,
+                "message": "Generation terminated by user",
+                "timestamp": datetime.now().isoformat()
+            })
+            print(f"Sent termination signal to Redis stream: {stream_name}")
+            
+        except Exception as e:
+            print(f"Error sending termination signal to Redis: {e}")
+        
+        return {
+            "status": "terminated",
+            "task_id": body.task_id,
+            "message": "Task terminated successfully"
+        }
+        
+    except Exception as e:
+        print(f"Error terminating task {body.task_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to terminate task: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

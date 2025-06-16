@@ -46,6 +46,7 @@ function NewChatComponent() {
       <FloatingChatContainer
         onSendMessage={handleSendMessage}
         onVoiceTranscription={() => {}}
+        onTerminateGeneration={() => {}}
         isLoading={createChatMutation.isPending}
         placeholder="Type a message to start a new chat..."
       />

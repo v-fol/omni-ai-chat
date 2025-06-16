@@ -32,6 +32,7 @@ function ChatComponent() {
   const [spacerHeight, setSpacerHeight] = useState(0);
   const [userScrolledManually, setUserScrolledManually] = useState(false);
   const [shouldMonitorScrolls, setShouldMonitorScrolls] = useState(false);
+  const [currentTaskId, setCurrentTaskId] = useState<string | null>(null);
   const sseRef = useRef<ChatEventSource | null>(null);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const lastMessageRef = useRef<HTMLDivElement | null>(null);
@@ -234,6 +235,7 @@ function ChatComponent() {
       onComplete: handleSSEComplete,
       onError: handleSSEError,
       onStart: handleSSEStart,
+      onTerminated: handleSSETerminated,
       onConnected: (consumer: string) => {
         console.log('SSE connected to Redis Stream for chat', chatId, 'with consumer:', consumer);
         
@@ -264,6 +266,51 @@ function ChatComponent() {
       sseRef.current = null;
     };
   }, [chatId, user]);
+
+  const handleTerminateGeneration = useCallback(async () => {
+    if (!currentTaskId) return;
+
+    try {
+      // Update UI state immediately
+      setIsLoading(false);
+      setSpacerHeight(0);
+      setCurrentTaskId(null);
+
+      // Update the last message status to terminated
+      setMessages(prev => prev.map((m, i) => 
+        i === prev.length - 1 && !m.isUser ? { 
+          ...m, 
+          status: 'terminated',
+          isComplete: false
+        } : m
+      ));
+
+      // Send terminate request to backend
+      const response = await fetch(`http://localhost:8000/chat/${chatId}/terminate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          task_id: currentTaskId
+        }),
+        credentials: 'include'
+      });
+
+      if (!response.ok) {
+        console.error('Failed to terminate generation:', response.statusText);
+      } else {
+        console.log('Successfully terminated generation');
+      }
+
+      // Note: Don't disconnect/reconnect SSE - let it handle the termination signal naturally
+
+    } catch (error) {
+      console.error('Error terminating generation:', error);
+      setIsLoading(false);
+      setCurrentTaskId(null);
+    }
+  }, [currentTaskId, chatId, setMessages, setIsLoading, setSpacerHeight]);
 
   const handleSendMessage = useCallback(async (messageText: string) => {
     const textToSend = messageText.trim();
@@ -303,6 +350,9 @@ function ChatComponent() {
       setSpacerHeight(0);
       alert(`Failed to send message: ${result.error}`);
     } else {
+      // Store the task ID for potential termination
+      setCurrentTaskId(result.taskId || null);
+      
       // Update the user message with the specific tempId with token count from API
       console.log('API Response tokens:', result.tokens);
       if (result.tokens !== undefined && result.tokens > 0) {
@@ -316,7 +366,7 @@ function ChatComponent() {
       }
       console.log(`Message sent successfully, task ID: ${result.taskId}, model: ${result.model}, provider: ${result.provider}`);
     }
-  }, [chatId, isLoading, selectedModel, searchEnabled, setMessages, setIsLoading, setSpacerHeight]);
+  }, [chatId, isLoading, selectedModel, searchEnabled, setMessages, setIsLoading, setSpacerHeight, setCurrentTaskId]);
 
   const handleVoiceTranscription = useCallback((transcribedText: string) => {
     // This is now handled by the ChatInput component directly
@@ -362,6 +412,7 @@ function ChatComponent() {
     console.log('Message generation complete:', messageId, 'Total chunks:', totalChunks, 'Tokens:', tokens, 'Completed at:', completedAt);
     setIsLoading(false);
     setSpacerHeight(0);
+    setCurrentTaskId(null); // Clear task ID when complete
     setMessages(prev => prev.map((m, i) => 
       i === prev.length - 1 ? { 
         ...m, 
@@ -377,10 +428,27 @@ function ChatComponent() {
     console.error('SSE error:', error);
     setIsLoading(false);
     setSpacerHeight(0);
+    setCurrentTaskId(null); // Clear task ID on error
     setMessages(prev => prev.map((m, i) => 
       i === prev.length - 1 ? { 
         ...m, 
         status: 'incomplete',
+        isComplete: false
+      } : m
+    ));
+  };
+
+  const handleSSETerminated = (taskId: string, message?: string) => {
+    console.log('SSE termination signal received:', taskId, message);
+    setIsLoading(false);
+    setSpacerHeight(0);
+    setCurrentTaskId(null);
+    
+    // Update the last message status to terminated if it's not already
+    setMessages(prev => prev.map((m, i) => 
+      i === prev.length - 1 && !m.isUser && m.status !== 'terminated' ? { 
+        ...m, 
+        status: 'terminated',
         isComplete: false
       } : m
     ));
@@ -414,6 +482,7 @@ function ChatComponent() {
       <FloatingChatContainer
         onSendMessage={handleSendMessage}
         onVoiceTranscription={handleVoiceTranscription}
+        onTerminateGeneration={handleTerminateGeneration}
         isLoading={isLoading}
         messages={messages}
         scrollAreaRef={scrollAreaRef}

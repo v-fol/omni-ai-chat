@@ -121,7 +121,7 @@ def init_worker_process(sender=None, **kwargs):
     loop.run_until_complete(init_thread_database())
     print(f"✅ Database initialized for worker process {os.getpid()}")
 
-@celery_app.task(bind=True)
+@celery_app.task(bind=True, time_limit=200)
 def generate_gemini_response(self, chat_id: str, user_email: str, enable_search: bool = False, model_name: str = "gemini-2.0-flash"):
     """
     Generate AI response and stream chunks to Redis Streams.
@@ -144,8 +144,11 @@ def generate_gemini_response(self, chat_id: str, user_email: str, enable_search:
         # Send error to Redis stream using sync client
         _send_error_to_redis_stream_sync(chat_id, str(e))
         raise e
+    finally:
+        # Clean up cancellation flag
+        cleanup_cancel_flag(task_id)
 
-@celery_app.task(bind=True)
+@celery_app.task(bind=True, time_limit=200)
 def generate_openrouter_response(self, chat_id: str, user_email: str, model_name: str):
     """
     Generate AI response using OpenRouter models and stream chunks to Redis Streams.
@@ -168,8 +171,11 @@ def generate_openrouter_response(self, chat_id: str, user_email: str, model_name
         # Send error to Redis stream using sync client
         _send_error_to_redis_stream_sync(chat_id, str(e))
         raise e
+    finally:
+        # Clean up cancellation flag
+        cleanup_cancel_flag(task_id)
 
-@celery_app.task(bind=True)
+@celery_app.task(bind=True, time_limit=200)
 def generate_github_response(self, chat_id: str, user_email: str, model_name: str):
     """
     Generate AI response using GitHub models and stream chunks to Redis Streams.
@@ -192,6 +198,9 @@ def generate_github_response(self, chat_id: str, user_email: str, model_name: st
         # Send error to Redis stream using sync client
         _send_error_to_redis_stream_sync(chat_id, str(e))
         raise e
+    finally:
+        # Clean up cancellation flag
+        cleanup_cancel_flag(task_id)
 
 async def _fetch_conversation_messages(db, chat_id: str):
     """
@@ -367,6 +376,32 @@ async def _generate_gemini_response_async(task_id: str, chat_id: str, user_email
         # Stream chunks to Redis Streams
         full_content = ""
         for chunk in response:
+            # Check for cooperative cancellation using Redis
+            if is_task_cancelled(task_id):
+                print(f"Task {task_id} was cancelled via Redis, stopping generation")
+                # Update message status to terminated
+                await db.messages.update_one(
+                    {"_id": message_id},
+                    {"$set": {
+                        "content": full_content,
+                        "status": "terminated",
+                        "is_complete": False
+                    }}
+                )
+                # Send termination signal
+                await redis_async_client.xadd(stream_name, {
+                    "type": "terminated",
+                    "task_id": task_id,
+                    "message": "Generation terminated by user",
+                    "timestamp": datetime.now().isoformat()
+                })
+                return {
+                    "status": "terminated",
+                    "message_id": str(message_id),
+                    "content": full_content,
+                    "total_chunks": sequence
+                }
+
             if chunk.text:
                 sequence += 1
                 full_content += chunk.text
@@ -555,6 +590,32 @@ async def _generate_openrouter_response_async(task_id: str, chat_id: str, user_e
         # Stream chunks to Redis Streams
         full_content = ""
         for chunk in response:
+            # Check for cooperative cancellation using Redis
+            if is_task_cancelled(task_id):
+                print(f"Task {task_id} was cancelled via Redis, stopping generation")
+                # Update message status to terminated
+                await db.messages.update_one(
+                    {"_id": message_id},
+                    {"$set": {
+                        "content": full_content,
+                        "status": "terminated",
+                        "is_complete": False
+                    }}
+                )
+                # Send termination signal
+                await redis_async_client.xadd(stream_name, {
+                    "type": "terminated",
+                    "task_id": task_id,
+                    "message": "Generation terminated by user",
+                    "timestamp": datetime.now().isoformat()
+                })
+                return {
+                    "status": "terminated",
+                    "message_id": str(message_id),
+                    "content": full_content,
+                    "total_chunks": sequence
+                }
+            
             # Check if chunk has choices and content
             if (hasattr(chunk, 'choices') and 
                 len(chunk.choices) > 0 and 
@@ -748,6 +809,32 @@ async def _generate_github_response_async(task_id: str, chat_id: str, user_email
         # Stream chunks to Redis Streams
         full_content = ""
         for chunk in response:
+            # Check for cooperative cancellation using Redis
+            if is_task_cancelled(task_id):
+                print(f"Task {task_id} was cancelled via Redis, stopping generation")
+                # Update message status to terminated
+                await db.messages.update_one(
+                    {"_id": message_id},
+                    {"$set": {
+                        "content": full_content,
+                        "status": "terminated",
+                        "is_complete": False
+                    }}
+                )
+                # Send termination signal
+                await redis_async_client.xadd(stream_name, {
+                    "type": "terminated",
+                    "task_id": task_id,
+                    "message": "Generation terminated by user",
+                    "timestamp": datetime.now().isoformat()
+                })
+                return {
+                    "status": "terminated",
+                    "message_id": str(message_id),
+                    "content": full_content,
+                    "total_chunks": sequence
+                }
+            
             # Check if chunk has choices and content
             if (hasattr(chunk, 'choices') and 
                 len(chunk.choices) > 0 and 
@@ -892,3 +979,28 @@ def cleanup_expired_streams():
                 
     except Exception as e:
         print(f"Cleanup error: {e}")
+
+# Redis-based cancellation mechanism (works across processes)
+def set_task_cancelled(task_id: str):
+    """Set cancellation flag for a task in Redis."""
+    try:
+        redis_client.setex(f"cancel:{task_id}", 300, "1")  # Expire after 5 minutes
+        print(f"Set cancellation flag for task {task_id}")
+    except Exception as e:
+        print(f"Error setting cancellation flag: {e}")
+
+def is_task_cancelled(task_id: str) -> bool:
+    """Check if task is cancelled via Redis."""
+    try:
+        return redis_client.exists(f"cancel:{task_id}") > 0
+    except Exception as e:
+        print(f"Error checking cancellation flag: {e}")
+        return False
+
+def cleanup_cancel_flag(task_id: str):
+    """Clean up the cancellation flag for a completed task."""
+    try:
+        redis_client.delete(f"cancel:{task_id}")
+        print(f"Cleaned up cancellation flag for task {task_id}")
+    except Exception as e:
+        print(f"Error cleaning up cancellation flag: {e}")

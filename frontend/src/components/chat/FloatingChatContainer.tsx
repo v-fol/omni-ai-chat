@@ -23,6 +23,8 @@ import {
   User,
   Bot,
   Globe,
+  Send,
+  Square,
 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { ModelSelector } from "@/components/chat/ModelSelector";
@@ -38,6 +40,7 @@ import { ChatSettingsPopover } from "@/components/chat/ChatSettingsPopover";
 interface FloatingChatContainerProps {
   onSendMessage: (message: string) => void;
   onVoiceTranscription: (text: string) => void;
+  onTerminateGeneration?: () => void;
   isLoading: boolean;
   placeholder?: string;
   className?: string;
@@ -51,8 +54,8 @@ const layoutConfig = {
     innerClass: "flex flex-col gap-4 p-2",
     inputWrapperClass: "flex-1",
     controlsClass: "flex justify-between mb-1 mx-1",
-    inputRows: 2,
-    inputHeight: "min-h-[64px]",
+    inputRows: 1,
+    inputHeight: "min-h-[44px]",
     showNavigation: false,
   },
   top: {
@@ -78,6 +81,7 @@ const layoutConfig = {
 export function FloatingChatContainer({
   onSendMessage,
   onVoiceTranscription,
+  onTerminateGeneration,
   isLoading,
   placeholder,
   className,
@@ -91,6 +95,7 @@ export function FloatingChatContainer({
   const [selectedModel] = useAtom(selectedModelAtom);
   const [sidebarCollapsed] = useAtom(sidebarCollapsedAtom);
   const chatInputRef = useRef<ChatInputRef>(null);
+  const [inputValue, setInputValue] = useState('');
 
   const handlePositionChange = () => {
     const positions = Object.keys(
@@ -107,10 +112,47 @@ export function FloatingChatContainer({
         chatInputRef.current.setText(text);
         chatInputRef.current.focus();
       }
+      setInputValue(text);
       onVoiceTranscription(text);
     },
     [onVoiceTranscription]
   );
+
+  const handleInputChange = useCallback((value: string) => {
+    setInputValue(value);
+  }, []);
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      const message = chatInputRef.current?.getValue()?.trim();
+      if (message && !isLoading) {
+        onSendMessage(message);
+        chatInputRef.current?.clear();
+        setInputValue('');
+      }
+    }
+  }, [onSendMessage, isLoading]);
+
+  const handleSendClick = useCallback(() => {
+    const message = chatInputRef.current?.getValue()?.trim();
+    if (message && !isLoading) {
+      onSendMessage(message);
+      chatInputRef.current?.clear();
+      setInputValue('');
+    }
+  }, [onSendMessage, isLoading]);
+
+  const handleTerminateClick = useCallback(() => {
+    if (onTerminateGeneration) {
+      onTerminateGeneration();
+    }
+  }, [onTerminateGeneration]);
+
+  const hasText = inputValue.trim().length > 0;
+  const showVoiceButton = !hasText && !isLoading;
+  const showSubmitButton = hasText && !isLoading;
+  const showTerminateButton = isLoading;
 
   const config = layoutConfig[chatPosition];
 
@@ -150,13 +192,54 @@ export function FloatingChatContainer({
       </Tooltip>
       </div>
 
+      <div>
 
-      <div className={cn("")}>
+      {/* Action Buttons */}
+      {showVoiceButton && (
         <VoiceRecordButton
           onTranscriptionComplete={handleVoiceTranscription}
           disabled={isLoading}
           className="size-8"
         />
+      )}
+
+
+      
+      {showSubmitButton && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              onClick={handleSendClick}
+              size="icon"
+              className={cn(
+                "rounded-full size-8 transition-colors",
+                theme === 'dark' 
+                  ? "bg-white hover:bg-neutral-200 text-black" 
+                  : "bg-black hover:bg-neutral-800 text-white"
+              )}
+            >
+              <Send className="w-4 h-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Send message</TooltipContent>
+        </Tooltip>
+      )}
+      
+      {showTerminateButton && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              onClick={handleTerminateClick}
+              size="icon"
+              variant="destructive"
+              className="rounded-full size-8 bg-red-500 hover:bg-red-600 text-white"
+            >
+              <Square className="w-3 h-3" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Stop generation</TooltipContent>
+        </Tooltip>
+      )}
       </div>
     </div>
   );
@@ -447,15 +530,15 @@ export function FloatingChatContainer({
 
           <div className={config.inputWrapperClass}>
             <ChatInput
-              onSendMessage={onSendMessage}
-              onVoiceTranscription={onVoiceTranscription}
-              isLoading={isLoading}
               theme={theme}
               placeholder={placeholder}
               inputWrapperClass="relative"
               inputHeight={config.inputHeight}
               rows={config.inputRows}
               isFloating={true}
+              disabled={isLoading}
+              onInputChange={handleInputChange}
+              onKeyDown={handleKeyDown}
               ref={chatInputRef}
               />
           </div>
