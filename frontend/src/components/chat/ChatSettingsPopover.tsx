@@ -5,74 +5,90 @@ import {
   DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
-  DropdownMenuPortal,
   DropdownMenuSeparator,
-  DropdownMenuShortcut,
-  DropdownMenuSub,
-  DropdownMenuSubContent,
-  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-
-import { Settings } from "lucide-react"
+import { Switch } from "@/components/ui/switch"
+import { useAtom } from 'jotai'
+import { chatPositionAtom, isAutoScrollAtom } from '@/lib/atoms'
+import { useTheme } from '@/lib/theme-context'
+import { Settings, Sun, Moon, LayoutGrid, ScrollText } from "lucide-react"
+import { Tooltip , TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 
 export function ChatSettingsPopover() {
+  const [chatPosition, setChatPosition] = useAtom(chatPositionAtom)
+  const [isAutoScroll, setIsAutoScroll] = useAtom(isAutoScrollAtom)
+  const { theme, toggleTheme } = useTheme()
+
+  const handlePositionChange = () => {
+    const positions = ['bottom', 'top', 'right'] as const
+    const currentIndex = positions.indexOf(chatPosition)
+    const nextIndex = (currentIndex + 1) % positions.length
+    setChatPosition(positions[nextIndex])
+  }
+
+  const getPositionLabel = () => {
+    switch (chatPosition) {
+      case 'bottom': return 'Bottom'
+      case 'top': return 'Top'
+      case 'right': return 'Right'
+      default: return 'Bottom'
+    }
+  }
+
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button variant="ghost" className="!outline-none border-0 !ring-0 cursor-pointer" >
-          <Settings className="w-4 h-4" />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent className="w-56" align="start">
-        <DropdownMenuLabel>My Account</DropdownMenuLabel>
-        <DropdownMenuGroup>
-          <DropdownMenuItem>
-            Profile
-            <DropdownMenuShortcut>⇧⌘P</DropdownMenuShortcut>
-          </DropdownMenuItem>
-          <DropdownMenuItem>
-            Billing
-            <DropdownMenuShortcut>⌘B</DropdownMenuShortcut>
-          </DropdownMenuItem>
-          <DropdownMenuItem>
-            Settings
-            <DropdownMenuShortcut>⌘S</DropdownMenuShortcut>
-          </DropdownMenuItem>
-          <DropdownMenuItem>
-            Keyboard shortcuts
-            <DropdownMenuShortcut>⌘K</DropdownMenuShortcut>
-          </DropdownMenuItem>
-        </DropdownMenuGroup>
-        <DropdownMenuSeparator />
-        <DropdownMenuGroup>
-          <DropdownMenuItem>Team</DropdownMenuItem>
-          <DropdownMenuSub>
-            <DropdownMenuSubTrigger>Invite users</DropdownMenuSubTrigger>
-            <DropdownMenuPortal>
-              <DropdownMenuSubContent>
-                <DropdownMenuItem>Email</DropdownMenuItem>
-                <DropdownMenuItem>Message</DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem>More...</DropdownMenuItem>
-              </DropdownMenuSubContent>
-            </DropdownMenuPortal>
-          </DropdownMenuSub>
-          <DropdownMenuItem>
-            New Team
-            <DropdownMenuShortcut>⌘+T</DropdownMenuShortcut>
-          </DropdownMenuItem>
-        </DropdownMenuGroup>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem>GitHub</DropdownMenuItem>
-        <DropdownMenuItem>Support</DropdownMenuItem>
-        <DropdownMenuItem disabled>API</DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem>
-          Log out
-          <DropdownMenuShortcut>⇧⌘Q</DropdownMenuShortcut>
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <Tooltip>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <TooltipTrigger asChild>  
+            <Button variant="ghost" size="icon" className="rounded-full size-8 hover:bg-neutral-200 dark:hover:bg-neutral-700">
+              <Settings className="w-4 h-4" />
+            </Button>
+          </TooltipTrigger>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent className="w-56" align="start">
+          <DropdownMenuLabel>Chat Settings</DropdownMenuLabel>
+          <DropdownMenuSeparator />
+          
+          <DropdownMenuGroup>
+            {/* Theme Toggle */}
+            <DropdownMenuItem onClick={toggleTheme} className="cursor-pointer">
+              <div className="flex items-center gap-2 w-full">
+                {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+                <span className="flex-1">{theme === 'dark' ? 'Light Mode' : 'Dark Mode'}</span>
+              </div>
+            </DropdownMenuItem>
+
+            {/* Position Toggle */}
+            <DropdownMenuItem onClick={handlePositionChange} className="cursor-pointer">
+              <div className="flex items-center gap-2 w-full">
+                <LayoutGrid className="w-4 h-4" />
+                <span className="flex-1">Input Position</span>
+                <span className="text-xs text-neutral-500">{getPositionLabel()}</span>
+              </div>
+            </DropdownMenuItem>
+
+            {/* Auto-scroll Toggle */}
+            <DropdownMenuItem 
+              onClick={(e) => e.preventDefault()} 
+              className="cursor-pointer focus:bg-transparent"
+            >
+              <div className="flex items-center gap-2 w-full">
+                <ScrollText className="w-4 h-4" />
+                <span className="flex-1">Auto-scroll</span>
+                <Switch
+                  checked={isAutoScroll}
+                  onCheckedChange={setIsAutoScroll}
+                  onClick={(e) => e.stopPropagation()}
+                />
+              </div>
+            </DropdownMenuItem>
+          </DropdownMenuGroup>
+        </DropdownMenuContent>
+      </DropdownMenu>
+      <TooltipContent>
+        <p>Chat Settings</p>
+      </TooltipContent>
+    </Tooltip>
   )
 }

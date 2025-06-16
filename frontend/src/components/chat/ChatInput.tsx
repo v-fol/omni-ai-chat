@@ -7,7 +7,6 @@ interface ChatInputProps {
   onSendMessage: (message: string) => void;
   onVoiceTranscription: (text: string) => void;
   isLoading: boolean;
-  searchEnabled: boolean;
   theme: string;
   placeholder?: string;
   className?: string;
@@ -25,7 +24,6 @@ export interface ChatInputRef {
 const ChatInput = memo(forwardRef<ChatInputRef, ChatInputProps>(({
   onSendMessage,
   isLoading,
-  searchEnabled,
   theme,
   placeholder,
   className,
@@ -62,9 +60,7 @@ const ChatInput = memo(forwardRef<ChatInputRef, ChatInputProps>(({
     }
   }, [onSendMessage]);
 
-  const defaultPlaceholder = searchEnabled 
-    ? "Type your message... (Google Search enabled)" 
-    : "Type your message...";
+  const defaultPlaceholder = "Type your message...";
 
   return (
     <div className={cn(inputWrapperClass, inputHeight, "relative", className)}>
@@ -75,7 +71,6 @@ const ChatInput = memo(forwardRef<ChatInputRef, ChatInputProps>(({
           isFloating ? (
             cn(
               "p-3 pr-12 bg-transparent border-0 focus:ring-0",
-              searchEnabled && "pl-16",
               inputHeight || "min-h-[44px]",
               theme === 'dark' ? 'text-neutral-100 placeholder:text-neutral-400' : 'text-neutral-900 placeholder:text-neutral-500'
             )
@@ -83,7 +78,6 @@ const ChatInput = memo(forwardRef<ChatInputRef, ChatInputProps>(({
             cn(
               "p-2 pr-12 rounded-md border focus:ring-2 focus:ring-accent-blue/50",
               inputHeight,
-              searchEnabled && "border-blue-500 bg-blue-50/50 dark:bg-blue-950/20",
               theme === 'dark' 
                 ? 'bg-background-dark-secondary text-text-light-primary border-border-dark' 
                 : 'bg-background-secondary text-text-primary border-border-light'
@@ -95,15 +89,7 @@ const ChatInput = memo(forwardRef<ChatInputRef, ChatInputProps>(({
         onKeyDown={handleKeyDown}
         disabled={isLoading}
       />
-      {searchEnabled && (
-        <div className={cn(
-          "absolute flex items-center gap-1 text-xs text-blue-600 dark:text-blue-400",
-          isFloating ? "left-3 top-1/2 transform -translate-y-1/2" : "left-2 top-2"
-        )}>
-          <Search className="w-3 h-3" />
-          <span className="font-medium">Search</span>
-        </div>
-      )}
+
     </div>
   );
 }));
