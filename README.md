@@ -138,14 +138,14 @@ uv run celery -A celery_app worker --loglevel=info
 
 ```bash
 cd frontend
-npm install
-npm run dev
+bun install
+bun run dev
 ```
 
 ### Dependencies
 
 - **Backend**: Python 3.13+, MongoDB, Redis
-- **Frontend**: Node.js 20+
+- **Frontend**: Bun (latest), Node.js runtime
 
 ## API Keys Setup
 
@@ -173,7 +173,7 @@ npm run dev
 
 ## Architecture
 
-- **Frontend**: React + TypeScript + Vite + TailwindCSS
+- **Frontend**: React + TypeScript + Vite + TailwindCSS (powered by Bun)
 - **Backend**: FastAPI + Python
 - **Database**: MongoDB with Beanie ODM
 - **Task Queue**: Celery + Redis
@@ -186,7 +186,7 @@ npm run dev
 - **redis**: Redis for caching and task queue
 - **backend**: FastAPI application server
 - **celery-worker**: Background task processor for AI requests
-- **frontend**: React development server
+- **frontend**: React development server (Bun runtime)
 
 ## Troubleshooting
 
