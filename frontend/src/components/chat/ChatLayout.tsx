@@ -8,6 +8,7 @@ import { useEffect, useState } from 'react';
 import { Plus, Search, SidebarOpen, LogOut, PanelLeft, PanelLeftClose, MessageCircleCode } from 'lucide-react';
 import { GitHubLoginButton } from '@/components/auth/GitHubLoginButton';
 import { ChatList } from '@/components/chat/ChatList';
+import { SearchModal } from '@/components/chat/SearchModal';
 import { useAuthStatus, useLogout } from '@/lib/queries';
 import { useNavigate } from '@tanstack/react-router';
 
@@ -17,6 +18,7 @@ export function ChatLayout({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useAtom(userAtom);
   const [chatPosition] = useAtom(chatPositionAtom);
   const [sheetOpen, setSheetOpen] = useState(false);
+  const [searchModalOpen, setSearchModalOpen] = useState(false);
   const { data: authData } = useAuthStatus();
   const logoutMutation = useLogout();
   const navigate = useNavigate();
@@ -28,13 +30,24 @@ export function ChatLayout({ children }: { children: React.ReactNode }) {
   const handleLogout = () => {
     logoutMutation.mutate();
     setUser(null);
+    // refresh the page
+    window.location.reload();
   };
 
   const handleNewChat = () => {
+    if (!user) return;
     if (chatPosition === 'right') {
       setSheetOpen(false);
     }
     navigate({ to: '/' });
+  };
+
+  const handleSearchClick = () => {
+    if (!user) return;
+    setSearchModalOpen(true);
+    if (chatPosition === 'right') {
+      setSheetOpen(false);
+    }
   };
 
   // Sidebar content component that can be reused
@@ -70,11 +83,13 @@ export function ChatLayout({ children }: { children: React.ReactNode }) {
         <div className="space-y-2">
           <Button
             onClick={handleNewChat}
+            disabled={!user}
             className={cn(
               "w-full justify-start gap-3 h-10",
               theme === 'dark' 
                 ? "bg-neutral-700 hover:bg-neutral-600 text-neutral-100" 
-                : "bg-neutral-200 hover:bg-neutral-300 text-neutral-900"
+                : "bg-neutral-200 hover:bg-neutral-300 text-neutral-900",
+              !user && "opacity-50 cursor-not-allowed"
             )}
           >
             <Plus className="w-4 h-4" />
@@ -83,11 +98,14 @@ export function ChatLayout({ children }: { children: React.ReactNode }) {
           
           <Button
             variant="outline"
+            onClick={handleSearchClick}
+            disabled={!user}
             className={cn(
               "w-full justify-start gap-3 h-10",
               theme === 'dark' 
                 ? "border-neutral-600 hover:bg-neutral-700" 
-                : "border-neutral-300 hover:bg-neutral-100"
+                : "border-neutral-300 hover:bg-neutral-100",
+              !user && "opacity-50 cursor-not-allowed"
             )}
           >
             <Search className="w-4 h-4" />
@@ -108,7 +126,7 @@ export function ChatLayout({ children }: { children: React.ReactNode }) {
             <div className="flex items-center gap-1">
               <Button
                 variant="ghost"
-                className="h-auto w-full p-2 justify-start text-left hover:bg-transparent"
+                className="h-auto  p-2 justify-start text-left hover:bg-transparent"
               >
               <img 
                 src={user.avatar_url} 
@@ -116,12 +134,27 @@ export function ChatLayout({ children }: { children: React.ReactNode }) {
                 className="w-8 h-8 rounded-full border-2 border-neutral-200 dark:border-neutral-600" 
               />
               <div className="flex-1 min-w-0">
-                  <div>
+                    <div>
+                  <div className="flex items-center gap-2">
                     <div className="font-medium text-sm truncate">{user.name}</div>
+                    {user && (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={handleLogout}
+                  className="h-auto py-1 ml-1 hover:!bg-red-400 "
+                >
+                  <LogOut className="w-4 h-4" />
+                </Button>
+                )}
+
+                </div>
                     <div className="text-xs text-neutral-500 truncate">@{user.login}</div>
                   </div>
               </div>
                 </Button>
+
+               
               
             </div>
             <div className="text-xs text-neutral-400 text-center font-bold">
@@ -194,6 +227,7 @@ export function ChatLayout({ children }: { children: React.ReactNode }) {
               variant="ghost"
               size="icon"
               onClick={chatPosition === 'right' ? () => setSheetOpen(true) : () => setSidebarCollapsed(false)}
+              disabled={!user && chatPosition === 'right'}
               className="size-8 rounded-none border-b border-neutral-200 dark:border-neutral-700"
               aria-label="Open sidebar"
             >
@@ -204,6 +238,7 @@ export function ChatLayout({ children }: { children: React.ReactNode }) {
               variant="ghost"
               size="icon"
               onClick={handleNewChat}
+              disabled={!user}
               className="size-8 rounded-none border-b border-neutral-200 dark:border-neutral-700"
               aria-label="New chat"
             >
@@ -213,6 +248,8 @@ export function ChatLayout({ children }: { children: React.ReactNode }) {
             <Button
               variant="ghost"
               size="icon"
+              onClick={handleSearchClick}
+              disabled={!user}
               className="size-8 rounded-none"
               aria-label="Search"
             >
@@ -225,6 +262,12 @@ export function ChatLayout({ children }: { children: React.ReactNode }) {
       <main className="flex-1 flex h-full">
         {children}
       </main>
+
+      {/* Search Modal */}
+      <SearchModal 
+        open={searchModalOpen} 
+        onOpenChange={setSearchModalOpen} 
+      />
     </div>
   );
 }

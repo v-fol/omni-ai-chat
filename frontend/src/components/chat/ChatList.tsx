@@ -14,10 +14,11 @@ import { Link, useNavigate, useParams } from '@tanstack/react-router';
 import { cn } from '@/lib/utils';
 import { useTheme } from '@/lib/theme-context';
 import type { Chat } from '@/lib/atoms';
-import { useChats, useDeleteChat } from '@/lib/queries';
-import { useAuthStatus } from '@/lib/queries'; // Needed for activeChatId
+import { useChats, useDeleteChat, useAuthStatus } from '@/lib/queries';
 import { useState } from 'react';
 import { ScrollArea } from '@radix-ui/react-scroll-area';
+import { useAtom } from 'jotai';
+import { userAtom } from '@/lib/atoms';
 
 interface ChatListProps {
   onChatClick?: () => void;
@@ -83,7 +84,7 @@ export function ChatList({ onChatClick }: ChatListProps) {
   const navigate = useNavigate();
   const params = useParams({ strict: false });
   const [chatToDelete, setChatToDelete] = useState<string | null>(null);
-
+  const [user] = useAtom(userAtom);
   const { data: chatsData, isLoading: isLoadingChats } = useChats();
   const deleteChatMutation = useDeleteChat();
   
@@ -203,7 +204,12 @@ export function ChatList({ onChatClick }: ChatListProps) {
           <div className="flex flex-col items-center justify-center py-8 text-center">
             <MessageSquare className="w-8 h-8 text-neutral-400 mb-3" />
             <div className="text-sm text-neutral-500 mb-1">No chats yet</div>
-            <div className="text-xs text-neutral-400">Start a new conversation to get started</div>
+            {user && (
+              <div className="text-xs text-neutral-400">Start a new conversation to get started</div>
+            )}
+            {!user && (
+              <div className="text-xs text-neutral-400">Login to see your chats</div>
+            )}
           </div>
         ) : (
           <ScrollArea className="space-y-2 overflow-y-auto ">

@@ -10,7 +10,7 @@ export function GitHubLoginButton() {
   return (
     <Button
       onClick={handleLogin}
-      className="flex items-center gap-2 bg-neutral-800 hover:bg-neutral-700 text-white"
+      className="flex w-full items-center gap-2 bg-neutral-800 hover:bg-neutral-700 text-white"
     >
       <Github size={20} />
       Sign in with GitHub

@@ -1,0 +1,17 @@
+{
+  "name": "Omni AI Chat",
+  "short_name": "Omni Chat",
+  "description": "Intelligent conversations with multiple AI models",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ],
+  "theme_color": "#2563eb",
+  "background_color": "#ffffff",
+  "display": "standalone",
+  "start_url": "/",
+  "scope": "/"
+} 

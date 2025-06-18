@@ -109,6 +109,10 @@ class VoiceTranscriptionRequest(BaseModel):
     audio_data: str  # Base64 encoded audio data
     mime_type: str = "audio/mp3"
 
+class SearchRequest(BaseModel):
+    query: str
+    limit: int = 20
+
 @app.get("/")
 def read_root():
     return {"status": "ok", "message": "Chat API is running"}
@@ -517,7 +521,7 @@ async def get_all_available_models():
                 "id": "gemini-2.5-flash-preview-05-20",
                 "name": "Gemini 2.5 Flash",
                 "provider": "google",
-                "supports_search": False,
+                "supports_search": True,
                 "description": "Google's latest multimodal AI model"
             },
 
@@ -530,7 +534,7 @@ async def get_all_available_models():
             },
             {
                 "id": "gemini-2.0-flash-lite",
-                "name": "Gemini 2.0 Flash Lite",
+                "name": "Gemini 2.0 Lite",
                 "provider": "google", 
                 "supports_search": True,
                 "description": "Google's older lightweight multimodal AI model"
@@ -1020,6 +1024,118 @@ async def terminate_chat_generation(chat_id: str, request: Request, body: Termin
     except Exception as e:
         print(f"Error terminating task {body.task_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to terminate task: {str(e)}")
+
+@app.post("/search/titles")
+async def search_chat_titles(request: Request, body: SearchRequest):
+    """
+    Search in chat titles (based on first message content).
+    Returns chats where the title matches the search query.
+    """
+    user = await get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    if not body.query.strip():
+        return {"results": []}
+    
+    # Search in chat titles using case-insensitive regex
+    chats = await Chat.find(
+        Chat.user_id == str(user.id),
+        {"title": {"$regex": body.query.strip(), "$options": "i"}}
+    ).sort("-updated_at").limit(body.limit).to_list()
+    
+    # Get first message for each chat for context
+    results = []
+    for chat in chats:
+        first_message = await Message.find(
+            Message.chat_id == str(chat.id),
+            Message.from_user == True
+        ).sort("created_at").limit(1).to_list()
+        
+        message_count = await Message.find(Message.chat_id == str(chat.id)).count()
+        
+        results.append({
+            "chat_id": str(chat.id),
+            "title": chat.title,
+            "updated_at": chat.updated_at,
+            "message_count": message_count,
+            "first_message": first_message[0].content if first_message else "",
+            "match_type": "title"
+        })
+    
+    return {"results": results}
+
+@app.post("/search/messages")
+async def search_chat_messages(request: Request, body: SearchRequest):
+    """
+    Search within all message content across all user's chats.
+    Returns messages that match the search query with chat context.
+    """
+    user = await get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    if not body.query.strip():
+        return {"results": []}
+    
+    # Get all user's chats first
+    user_chats = await Chat.find(Chat.user_id == str(user.id)).to_list()
+    chat_ids = [str(chat.id) for chat in user_chats]
+    
+    if not chat_ids:
+        return {"results": []}
+    
+    # Search in message content using case-insensitive regex
+    messages = await Message.find(
+        {"chat_id": {"$in": chat_ids}},
+        {"content": {"$regex": body.query.strip(), "$options": "i"}}
+    ).sort("-created_at").limit(body.limit).to_list()
+    
+    # Group messages by chat and get chat info
+    results = []
+    chat_cache = {str(chat.id): chat for chat in user_chats}
+    
+    for message in messages:
+        chat = chat_cache.get(message.chat_id)
+        if not chat:
+            continue
+            
+        # Get message count for this chat
+        message_count = await Message.find(Message.chat_id == message.chat_id).count()
+        
+        # Highlight the search term in content (simple version)
+        content = message.content
+        query_lower = body.query.strip().lower()
+        
+        # Find the position of the match for context
+        content_lower = content.lower()
+        match_pos = content_lower.find(query_lower)
+        
+        # Extract context around the match (150 chars before and after)
+        if match_pos != -1:
+            start = max(0, match_pos - 150)
+            end = min(len(content), match_pos + len(body.query) + 150)
+            context = content[start:end]
+            if start > 0:
+                context = "..." + context
+            if end < len(content):
+                context = context + "..."
+        else:
+            # Fallback: just take first 300 chars
+            context = content[:300] + ("..." if len(content) > 300 else "")
+        
+        results.append({
+            "chat_id": str(chat.id),
+            "title": chat.title,
+            "updated_at": chat.updated_at,
+            "message_count": message_count,
+            "message_content": context,
+            "message_from_user": message.from_user,
+            "message_created_at": message.created_at,
+            "match_type": "message"
+        })
+    
+    return {"results": results}
 
 if __name__ == "__main__":
     import uvicorn

@@ -13,6 +13,7 @@ import {
   searchEnabledAtom,
   selectedModelAtom,
   sidebarCollapsedAtom,
+  userAtom,
 } from "@/lib/atoms";
 import {
   LayoutGrid,
@@ -30,6 +31,7 @@ import { Switch } from "@/components/ui/switch";
 import { ModelSelector } from "@/components/chat/ModelSelector";
 import { ChatInput, type ChatInputRef } from "@/components/chat/ChatInput";
 import { ShineBorder } from "@/components/magicui/shine-border";
+import { SearchModal } from "@/components/chat/SearchModal";
 import { useCallback, useMemo, useState, useRef } from "react";
 import remarkGfm from "remark-gfm";
 import Markdown from "react-markdown";
@@ -94,6 +96,8 @@ export function FloatingChatContainer({
   const [searchEnabled, setSearchEnabled] = useAtom(searchEnabledAtom);
   const [selectedModel] = useAtom(selectedModelAtom);
   const [sidebarCollapsed] = useAtom(sidebarCollapsedAtom);
+  const [searchModalOpen, setSearchModalOpen] = useState(false);
+  const [user] = useAtom(userAtom);
   const chatInputRef = useRef<ChatInputRef>(null);
   const [inputValue, setInputValue] = useState('');
 
@@ -108,6 +112,7 @@ export function FloatingChatContainer({
 
   const handleVoiceTranscription = useCallback(
     (text: string) => {
+      if (!user) return;
       if (chatInputRef.current) {
         chatInputRef.current.setText(text);
         chatInputRef.current.focus();
@@ -115,7 +120,7 @@ export function FloatingChatContainer({
       setInputValue(text);
       onVoiceTranscription(text);
     },
-    [onVoiceTranscription]
+    [onVoiceTranscription, user]
   );
 
   const handleInputChange = useCallback((value: string) => {
@@ -123,6 +128,7 @@ export function FloatingChatContainer({
   }, []);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (!user) return;
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       const message = chatInputRef.current?.getValue()?.trim();
@@ -132,22 +138,28 @@ export function FloatingChatContainer({
         setInputValue('');
       }
     }
-  }, [onSendMessage, isLoading]);
+  }, [onSendMessage, isLoading, user]);
 
   const handleSendClick = useCallback(() => {
+    if (!user) return;
     const message = chatInputRef.current?.getValue()?.trim();
     if (message && !isLoading) {
       onSendMessage(message);
       chatInputRef.current?.clear();
       setInputValue('');
     }
-  }, [onSendMessage, isLoading]);
+  }, [onSendMessage, isLoading, user]);
 
   const handleTerminateClick = useCallback(() => {
     if (onTerminateGeneration) {
       onTerminateGeneration();
     }
   }, [onTerminateGeneration]);
+
+  const handleSearchModalClick = useCallback(() => {
+    if (!user) return;
+    setSearchModalOpen(true);
+  }, [user]);
 
   const hasText = inputValue.trim().length > 0;
   const showVoiceButton = !hasText && !isLoading;
@@ -170,26 +182,29 @@ export function FloatingChatContainer({
         <ChatSettingsPopover />
       )}
 
+
       <Tooltip>
         <TooltipTrigger asChild>
           <Button
             variant={searchEnabled ? "default" : "ghost"}
             size="icon"
             onClick={() => setSearchEnabled(!searchEnabled)}
-            disabled={!selectedModel.supports_search}
+            disabled={!selectedModel.supports_search || !user}
             className={cn(
               "rounded-full size-8",
               searchEnabled && "bg-blue-600 hover:bg-blue-700 text-white",
               !searchEnabled &&
                 "hover:bg-neutral-200 dark:hover:bg-neutral-700",
-              !selectedModel.supports_search && "opacity-50 cursor-not-allowed"
+              (!selectedModel.supports_search || !user) && "opacity-50 cursor-not-allowed"
             )}
           >
             <Globe  className="w-4 h-4" />
           </Button>
         </TooltipTrigger>
         <TooltipContent>
-          {!selectedModel.supports_search
+          {!user
+            ? "Login required for search"
+            : !selectedModel.supports_search
             ? "Search not supported by this model"
             : searchEnabled
               ? "Disable Google Search"
@@ -204,7 +219,7 @@ export function FloatingChatContainer({
       {showVoiceButton && chatPosition !== "right" && (
         <VoiceRecordButton
           onTranscriptionComplete={handleVoiceTranscription}
-          disabled={isLoading}
+          disabled={isLoading || !user}
           className="size-8"
         />
       )}
@@ -217,17 +232,21 @@ export function FloatingChatContainer({
             <Button
               onClick={handleSendClick}
               size="icon"
+              disabled={!user}
               className={cn(
                 "rounded-full size-8 transition-colors",
                 theme === 'dark' 
                   ? "bg-white hover:bg-neutral-200 text-black" 
-                  : "bg-black hover:bg-neutral-800 text-white"
+                  : "bg-black hover:bg-neutral-800 text-white",
+                !user && "opacity-50 cursor-not-allowed"
               )}
             >
               <Send className="w-4 h-4" />
             </Button>
           </TooltipTrigger>
-          <TooltipContent>Send message</TooltipContent>
+          <TooltipContent>
+            {!user ? "Login required to send messages" : "Send message"}
+          </TooltipContent>
         </Tooltip>
       )}
       
@@ -491,57 +510,58 @@ export function FloatingChatContainer({
   }
 
   return (
-    <div className={config.containerClass}>
-      <div
-        className={cn(
-          "relative rounded-3xl shadow-2xl backdrop-blur-sm border w-full",
-          theme === "dark"
-            ? "bg-neutral-900/95 border-neutral-700/50"
-            : "bg-white/95 border-neutral-200/50",
-          config.showNavigation && "min-h-[500px]" // Ensure minimum height for navigation
-        )}
-      >
-        {messages.length === 0 && (
-          <ShineBorder
-            className="opacity-50"
-            shineColor={["#A07CFE", "#FE8FB5", "#FFBE7B"]}
-          />
-        )}
-
+    <>
+      <div className={config.containerClass}>
         <div
           className={cn(
-            config.innerClass,
-            config.showNavigation && "h-full",
-            "relative z-10"
+            "relative rounded-3xl shadow-2xl backdrop-blur-sm border w-full",
+            theme === "dark"
+              ? "bg-neutral-900/95 border-neutral-700/50"
+              : "bg-white/95 border-neutral-200/50",
+            config.showNavigation && "min-h-[500px]" // Ensure minimum height for navigation
           )}
         >
+          {messages.length === 0 && (
+            <ShineBorder
+              className="opacity-50"
+              shineColor={["#A07CFE", "#FE8FB5", "#FFBE7B"]}
+            />
+          )}
 
-          <div className={config.inputWrapperClass}>
+          <div
+            className={cn(
+              config.innerClass,
+              config.showNavigation && "h-full",
+              "relative z-10"
+            )}
+          >
 
-          {chatPosition === "right" && controls}
+            <div className={config.inputWrapperClass}>
 
-            <ChatInput
-              theme={theme}
-              placeholder={placeholder}
-              inputWrapperClass="relative"
-              inputHeight={config.inputHeight}
-              rows={config.inputRows}
-              isFloating={true}
-              disabled={isLoading}
-              onInputChange={handleInputChange}
-              onKeyDown={handleKeyDown}
-              ref={chatInputRef}
-              />
-          </div>
-        
+            {chatPosition === "right" && controls}
+
+              <ChatInput
+                theme={theme}
+                placeholder={user ? placeholder : "Please sign in to start chatting..."}
+                inputWrapperClass="relative"
+                inputHeight={config.inputHeight}
+                rows={config.inputRows}
+                isFloating={true}
+                disabled={isLoading || !user}
+                onInputChange={handleInputChange}
+                onKeyDown={handleKeyDown}
+                ref={chatInputRef}
+                />
+            </div>
+          
             {chatPosition !== "right" && controls}
 
-          <div className="flex justify-end">
+            <div className="flex justify-end">
 
             {showVoiceButton && chatPosition === "right" && (
               <VoiceRecordButton
               onTranscriptionComplete={handleVoiceTranscription}
-              disabled={isLoading}
+              disabled={isLoading || !user}
               className="size-8"
               />
             )}
@@ -552,17 +572,21 @@ export function FloatingChatContainer({
                       <Button
                         onClick={handleSendClick}
                         size="icon"
+                        disabled={!user}
                         className={cn(
                           "rounded-full size-8 transition-colors",
                           theme === 'dark' 
                           ? "bg-white hover:bg-neutral-200 text-black" 
-                          : "bg-black hover:bg-neutral-800 text-white"
+                          : "bg-black hover:bg-neutral-800 text-white",
+                          !user && "opacity-50 cursor-not-allowed"
                         )}
                       >
                         <Send className="w-4 h-4" />
                       </Button>
                     </TooltipTrigger>
-                    <TooltipContent>Send message</TooltipContent>
+                    <TooltipContent>
+                      {!user ? "Login required to send messages" : "Send message"}
+                    </TooltipContent>
                   </Tooltip>
                 )}
                 
@@ -594,6 +618,13 @@ export function FloatingChatContainer({
             
         </div>
       </div>
-    </div>
+      </div>
+
+      {/* Search Modal */}
+      <SearchModal 
+        open={searchModalOpen} 
+        onOpenChange={setSearchModalOpen} 
+      />
+    </>
   );
 }
