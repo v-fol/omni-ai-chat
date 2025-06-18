@@ -1,13 +1,13 @@
-FROM node:20-alpine
+FROM oven/bun:1-alpine
 
 # Set working directory
 WORKDIR /app
 
 # Copy package files first for better caching
-COPY package*.json ./
+COPY package.json bun.lockb ./
 
-# Install dependencies
-RUN npm ci
+# Install dependencies using bun
+RUN bun install --frozen-lockfile
 
 # Copy the rest of the application
 COPY . .
@@ -16,4 +16,4 @@ COPY . .
 EXPOSE 5173
 
 # Default command (can be overridden in docker-compose)
-CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"] 
+CMD ["bun", "run", "dev", "--host", "0.0.0.0"] 
