@@ -19,7 +19,7 @@ Submission for the t3 chat cloneathon [https://cloneathon.t3.chat/](https://clon
 - [ ] File input
 - [X] Multiple AI models
 - [ ] Audio output
-- [ ] Token count
+- [X] Token count
 
 #### 2. User management
 
@@ -34,7 +34,7 @@ Submission for the t3 chat cloneathon [https://cloneathon.t3.chat/](https://clon
 - [X] Chat history pagination
 - [ ] Structute chats in folders / workspaces
 - [ ] Chat sharing with unique URLs
-- [ ] Message search functionality
+- [X] Message search functionality
 
 #### 4. UI/UX
 
@@ -42,7 +42,7 @@ Submission for the t3 chat cloneathon [https://cloneathon.t3.chat/](https://clon
 - [ ] Responsive design (mobile, desktop)
 - [ ] Animations
 - [ ] Keyboard shortcuts
-- [ ] Pretty UI
+- [X] Pretty UI
 
 #### 5. Advanced features
 

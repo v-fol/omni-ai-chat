@@ -15,6 +15,7 @@ from functools import lru_cache
 import threading
 import motor.motor_asyncio
 from bson import ObjectId
+import tiktoken
 
 from celery_app import celery_app
 
@@ -120,8 +121,8 @@ def init_worker_process(sender=None, **kwargs):
     loop.run_until_complete(init_thread_database())
     print(f"✅ Database initialized for worker process {os.getpid()}")
 
-@celery_app.task(bind=True)
-def generate_ai_response(self, chat_id: str, user_email: str, enable_search: bool = False):
+@celery_app.task(bind=True, time_limit=200)
+def generate_gemini_response(self, chat_id: str, user_email: str, enable_search: bool = False, model_name: str = "gemini-2.0-flash"):
     """
     Generate AI response and stream chunks to Redis Streams.
     Uses Motor directly to avoid Beanie event loop conflicts.
@@ -135,7 +136,7 @@ def generate_ai_response(self, chat_id: str, user_email: str, enable_search: boo
         
         # Run the async function
         result = loop.run_until_complete(
-            _generate_ai_response_async(task_id, chat_id, user_email, enable_search)
+            _generate_gemini_response_async(task_id, chat_id, user_email, enable_search, model_name)
         )
         return result
             
@@ -143,8 +144,11 @@ def generate_ai_response(self, chat_id: str, user_email: str, enable_search: boo
         # Send error to Redis stream using sync client
         _send_error_to_redis_stream_sync(chat_id, str(e))
         raise e
+    finally:
+        # Clean up cancellation flag
+        cleanup_cancel_flag(task_id)
 
-@celery_app.task(bind=True)
+@celery_app.task(bind=True, time_limit=200)
 def generate_openrouter_response(self, chat_id: str, user_email: str, model_name: str):
     """
     Generate AI response using OpenRouter models and stream chunks to Redis Streams.
@@ -167,8 +171,11 @@ def generate_openrouter_response(self, chat_id: str, user_email: str, model_name
         # Send error to Redis stream using sync client
         _send_error_to_redis_stream_sync(chat_id, str(e))
         raise e
+    finally:
+        # Clean up cancellation flag
+        cleanup_cancel_flag(task_id)
 
-@celery_app.task(bind=True)
+@celery_app.task(bind=True, time_limit=200)
 def generate_github_response(self, chat_id: str, user_email: str, model_name: str):
     """
     Generate AI response using GitHub models and stream chunks to Redis Streams.
@@ -191,6 +198,9 @@ def generate_github_response(self, chat_id: str, user_email: str, model_name: st
         # Send error to Redis stream using sync client
         _send_error_to_redis_stream_sync(chat_id, str(e))
         raise e
+    finally:
+        # Clean up cancellation flag
+        cleanup_cancel_flag(task_id)
 
 async def _fetch_conversation_messages(db, chat_id: str):
     """
@@ -249,7 +259,20 @@ def _build_openai_conversation(messages):
     
     return openai_messages
 
-async def _generate_ai_response_async(task_id: str, chat_id: str, user_email: str, enable_search: bool = False):
+def _count_tokens(text: str) -> int:
+    """
+    Count tokens using tiktoken with default encoding.
+    Simple and good enough for all models.
+    """
+    try:
+        encoding = tiktoken.get_encoding("cl100k_base")
+        return len(encoding.encode(text))
+    except Exception as e:
+        print(f"Error counting tokens: {e}")
+        # Fallback: rough estimation (1 token ≈ 4 characters)
+        return len(text) // 4
+
+async def _generate_gemini_response_async(task_id: str, chat_id: str, user_email: str, enable_search: bool = False, model_name: str = "gemini-2.0-flash"):
     """
     Async implementation of AI response generation with Redis Streams.
     Uses Motor directly to avoid event loop conflicts.
@@ -310,10 +333,11 @@ async def _generate_ai_response_async(task_id: str, chat_id: str, user_email: st
             "chat_id": chat_id,
             "from_user": False,
             "content": "",
-            "model": "gemini-2.0-flash" + (" + Google Search" if enable_search else ""),
+            "model": model_name + (" + Google Search" if enable_search else ""),
             "created_at": datetime.now(),
             "status": "streaming",
-            "is_complete": False
+            "is_complete": False,
+            "tokens": 0  # Will be updated when response is complete
         }
         result = await db.messages.insert_one(ai_message_doc)
         message_id = result.inserted_id
@@ -335,7 +359,7 @@ async def _generate_ai_response_async(task_id: str, chat_id: str, user_email: st
             
             # Generate streaming response from Gemini with Google Search
             response = gemini_client.models.generate_content_stream(
-                model="gemini-2.0-flash",
+                model=model_name,
                 contents=gemini_contents,
                 config=GenerateContentConfig(
                     tools=[google_search_tool],
@@ -345,13 +369,39 @@ async def _generate_ai_response_async(task_id: str, chat_id: str, user_email: st
         else:
             # Generate streaming response from Gemini without search
             response = gemini_client.models.generate_content_stream(
-                model="gemini-2.0-flash",
+                model=model_name,
                 contents=gemini_contents
             )
         
         # Stream chunks to Redis Streams
         full_content = ""
         for chunk in response:
+            # Check for cooperative cancellation using Redis
+            if is_task_cancelled(task_id):
+                print(f"Task {task_id} was cancelled via Redis, stopping generation")
+                # Update message status to terminated
+                await db.messages.update_one(
+                    {"_id": message_id},
+                    {"$set": {
+                        "content": full_content,
+                        "status": "terminated",
+                        "is_complete": False
+                    }}
+                )
+                # Send termination signal
+                await redis_async_client.xadd(stream_name, {
+                    "type": "terminated",
+                    "task_id": task_id,
+                    "message": "Generation terminated by user",
+                    "timestamp": datetime.now().isoformat()
+                })
+                return {
+                    "status": "terminated",
+                    "message_id": str(message_id),
+                    "content": full_content,
+                    "total_chunks": sequence
+                }
+
             if chunk.text:
                 sequence += 1
                 full_content += chunk.text
@@ -378,12 +428,17 @@ async def _generate_ai_response_async(task_id: str, chat_id: str, user_email: st
                     await asyncio.sleep(0.001)
         
         # Final updates using Motor directly
+        tokens = _count_tokens(full_content)
+        completion_time = datetime.now()
+        
         await db.messages.update_one(
             {"_id": message_id},
             {"$set": {
                 "content": full_content,
                 "status": "complete",
-                "is_complete": True
+                "is_complete": True,
+                "tokens": tokens,
+                "completed_at": completion_time
             }}
         )
         
@@ -393,7 +448,7 @@ async def _generate_ai_response_async(task_id: str, chat_id: str, user_email: st
             {"$set": {"updated_at": datetime.now()}}
         )
         
-        # Send completion signal
+        # Send completion signal with token count
         await redis_async_client.xadd(stream_name, {
             "type": "complete",
             "message_id": str(message_id),
@@ -402,17 +457,20 @@ async def _generate_ai_response_async(task_id: str, chat_id: str, user_email: st
             "total_chunks": sequence,
             "final_length": len(full_content),
             "search_enabled": str(enable_search),
+            "tokens": str(tokens),
+            "completed_at": completion_time.isoformat(),
             "timestamp": datetime.now().isoformat()
         })
         
-        print(f"✅ Completed AI response with {sequence} chunks in task {task_id} (search: {enable_search})")
+        print(f"✅ Completed AI response with {sequence} chunks in task {task_id} (search: {enable_search}, tokens: {tokens})")
         
         return {
             "status": "complete",
             "message_id": str(message_id),
             "content": full_content,
             "total_chunks": sequence,
-            "search_enabled": enable_search
+            "search_enabled": enable_search,
+            "tokens": tokens
         }
         
     except Exception as e:
@@ -495,7 +553,6 @@ async def _generate_openrouter_response_async(task_id: str, chat_id: str, user_e
         # Build conversation context for OpenAI format
         openai_messages = _build_openai_conversation(messages)
         
-
         # Create AI message record using Motor directly
         ai_message_doc = {
             "chat_id": chat_id,
@@ -504,7 +561,8 @@ async def _generate_openrouter_response_async(task_id: str, chat_id: str, user_e
             "model": model_name,
             "created_at": datetime.now(),
             "status": "streaming",
-            "is_complete": False
+            "is_complete": False,
+            "tokens": 0  # Will be updated when response is complete
         }
         result = await db.messages.insert_one(ai_message_doc)
         message_id = result.inserted_id
@@ -532,6 +590,32 @@ async def _generate_openrouter_response_async(task_id: str, chat_id: str, user_e
         # Stream chunks to Redis Streams
         full_content = ""
         for chunk in response:
+            # Check for cooperative cancellation using Redis
+            if is_task_cancelled(task_id):
+                print(f"Task {task_id} was cancelled via Redis, stopping generation")
+                # Update message status to terminated
+                await db.messages.update_one(
+                    {"_id": message_id},
+                    {"$set": {
+                        "content": full_content,
+                        "status": "terminated",
+                        "is_complete": False
+                    }}
+                )
+                # Send termination signal
+                await redis_async_client.xadd(stream_name, {
+                    "type": "terminated",
+                    "task_id": task_id,
+                    "message": "Generation terminated by user",
+                    "timestamp": datetime.now().isoformat()
+                })
+                return {
+                    "status": "terminated",
+                    "message_id": str(message_id),
+                    "content": full_content,
+                    "total_chunks": sequence
+                }
+            
             # Check if chunk has choices and content
             if (hasattr(chunk, 'choices') and 
                 len(chunk.choices) > 0 and 
@@ -565,12 +649,17 @@ async def _generate_openrouter_response_async(task_id: str, chat_id: str, user_e
                     await asyncio.sleep(0.001)
         
         # Final updates using Motor directly
+        tokens = _count_tokens(full_content)
+        completion_time = datetime.now()
+        
         await db.messages.update_one(
             {"_id": message_id},
             {"$set": {
                 "content": full_content,
                 "status": "complete",
-                "is_complete": True
+                "is_complete": True,
+                "tokens": tokens,
+                "completed_at": completion_time
             }}
         )
         
@@ -580,7 +669,7 @@ async def _generate_openrouter_response_async(task_id: str, chat_id: str, user_e
             {"$set": {"updated_at": datetime.now()}}
         )
         
-        # Send completion signal
+        # Send completion signal with token count
         await redis_async_client.xadd(stream_name, {
             "type": "complete",
             "message_id": str(message_id),
@@ -589,17 +678,20 @@ async def _generate_openrouter_response_async(task_id: str, chat_id: str, user_e
             "total_chunks": sequence,
             "final_length": len(full_content),
             "model": model_name,
+            "tokens": str(tokens),
+            "completed_at": completion_time.isoformat(),
             "timestamp": datetime.now().isoformat()
         })
         
-        print(f"✅ Completed OpenRouter response with {sequence} chunks in task {task_id} (model: {model_name})")
+        print(f"✅ Completed OpenRouter response with {sequence} chunks in task {task_id} (model: {model_name}, tokens: {tokens})")
         
         return {
             "status": "complete",
             "message_id": str(message_id),
             "content": full_content,
             "total_chunks": sequence,
-            "model": model_name
+            "model": model_name,
+            "tokens": tokens
         }
         
     except Exception as e:
@@ -682,7 +774,6 @@ async def _generate_github_response_async(task_id: str, chat_id: str, user_email
         # Build conversation context for OpenAI format
         openai_messages = _build_openai_conversation(messages)
         
-
         # Create AI message record using Motor directly
         ai_message_doc = {
             "chat_id": chat_id,
@@ -691,7 +782,8 @@ async def _generate_github_response_async(task_id: str, chat_id: str, user_email
             "model": model_name,
             "created_at": datetime.now(),
             "status": "streaming",
-            "is_complete": False
+            "is_complete": False,
+            "tokens": 0  # Will be updated when response is complete
         }
         result = await db.messages.insert_one(ai_message_doc)
         message_id = result.inserted_id
@@ -717,6 +809,32 @@ async def _generate_github_response_async(task_id: str, chat_id: str, user_email
         # Stream chunks to Redis Streams
         full_content = ""
         for chunk in response:
+            # Check for cooperative cancellation using Redis
+            if is_task_cancelled(task_id):
+                print(f"Task {task_id} was cancelled via Redis, stopping generation")
+                # Update message status to terminated
+                await db.messages.update_one(
+                    {"_id": message_id},
+                    {"$set": {
+                        "content": full_content,
+                        "status": "terminated",
+                        "is_complete": False
+                    }}
+                )
+                # Send termination signal
+                await redis_async_client.xadd(stream_name, {
+                    "type": "terminated",
+                    "task_id": task_id,
+                    "message": "Generation terminated by user",
+                    "timestamp": datetime.now().isoformat()
+                })
+                return {
+                    "status": "terminated",
+                    "message_id": str(message_id),
+                    "content": full_content,
+                    "total_chunks": sequence
+                }
+            
             # Check if chunk has choices and content
             if (hasattr(chunk, 'choices') and 
                 len(chunk.choices) > 0 and 
@@ -750,12 +868,17 @@ async def _generate_github_response_async(task_id: str, chat_id: str, user_email
                     await asyncio.sleep(0.001)
         
         # Final updates using Motor directly
+        tokens = _count_tokens(full_content)
+        completion_time = datetime.now()
+        
         await db.messages.update_one(
             {"_id": message_id},
             {"$set": {
                 "content": full_content,
                 "status": "complete",
-                "is_complete": True
+                "is_complete": True,
+                "tokens": tokens,
+                "completed_at": completion_time
             }}
         )
         
@@ -765,7 +888,7 @@ async def _generate_github_response_async(task_id: str, chat_id: str, user_email
             {"$set": {"updated_at": datetime.now()}}
         )
         
-        # Send completion signal
+        # Send completion signal with token count
         await redis_async_client.xadd(stream_name, {
             "type": "complete",
             "message_id": str(message_id),
@@ -774,17 +897,20 @@ async def _generate_github_response_async(task_id: str, chat_id: str, user_email
             "total_chunks": sequence,
             "final_length": len(full_content),
             "model": model_name,
+            "tokens": str(tokens),
+            "completed_at": completion_time.isoformat(),
             "timestamp": datetime.now().isoformat()
         })
         
-        print(f"✅ Completed GitHub response with {sequence} chunks in task {task_id} (model: {model_name})")
+        print(f"✅ Completed GitHub response with {sequence} chunks in task {task_id} (model: {model_name}, tokens: {tokens})")
         
         return {
             "status": "complete",
             "message_id": str(message_id),
             "content": full_content,
             "total_chunks": sequence,
-            "model": model_name
+            "model": model_name,
+            "tokens": tokens
         }
         
     except Exception as e:
@@ -853,3 +979,28 @@ def cleanup_expired_streams():
                 
     except Exception as e:
         print(f"Cleanup error: {e}")
+
+# Redis-based cancellation mechanism (works across processes)
+def set_task_cancelled(task_id: str):
+    """Set cancellation flag for a task in Redis."""
+    try:
+        redis_client.setex(f"cancel:{task_id}", 300, "1")  # Expire after 5 minutes
+        print(f"Set cancellation flag for task {task_id}")
+    except Exception as e:
+        print(f"Error setting cancellation flag: {e}")
+
+def is_task_cancelled(task_id: str) -> bool:
+    """Check if task is cancelled via Redis."""
+    try:
+        return redis_client.exists(f"cancel:{task_id}") > 0
+    except Exception as e:
+        print(f"Error checking cancellation flag: {e}")
+        return False
+
+def cleanup_cancel_flag(task_id: str):
+    """Clean up the cancellation flag for a completed task."""
+    try:
+        redis_client.delete(f"cancel:{task_id}")
+        print(f"Cleaned up cancellation flag for task {task_id}")
+    except Exception as e:
+        print(f"Error cleaning up cancellation flag: {e}")

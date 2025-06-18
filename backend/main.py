@@ -22,7 +22,7 @@ import time
 import httpx
 
 from db.engine import User, Chat, Message, init as init_db
-from tasks import generate_ai_response, generate_openrouter_response, generate_github_response
+from tasks import generate_gemini_response, generate_openrouter_response, generate_github_response, _count_tokens, set_task_cancelled
 
 # Load environment variables
 load_dotenv()
@@ -102,9 +102,16 @@ class SendMessageRequest(BaseModel):
     model: str = "gemini-2.0-flash"  # Default to Gemini
     provider: str = "google"  # Default to Google
 
+class TerminateTaskRequest(BaseModel):
+    task_id: str
+
 class VoiceTranscriptionRequest(BaseModel):
     audio_data: str  # Base64 encoded audio data
     mime_type: str = "audio/mp3"
+
+class SearchRequest(BaseModel):
+    query: str
+    limit: int = 20
 
 @app.get("/")
 def read_root():
@@ -218,16 +225,22 @@ async def get_chats(request: Request):
         raise HTTPException(status_code=401, detail="Not authenticated")
     
     # Get all chats for the user, sorted by updated_at
-    chats = await Chat.find(Chat.user_id == str(user.id)).sort(-Chat.updated_at).to_list()
+    chats = await Chat.find(Chat.user_id == str(user.id)).sort("-updated_at").to_list()
     
-    # Format the response with more details
-    return {
-        "chats": [{
+    # Get message counts for each chat
+    chat_data = []
+    for chat in chats:
+        message_count = await Message.find(Message.chat_id == str(chat.id)).count()
+        chat_data.append({
             "id": str(chat.id),
             "title": chat.title,
             "created_at": chat.created_at,
-            "updated_at": chat.updated_at
-        } for chat in chats]
+            "updated_at": chat.updated_at,
+            "message_count": message_count
+        })
+    
+    return {
+        "chats": chat_data
     }
 
 @app.get("/chat/{chat_id}")
@@ -242,19 +255,13 @@ async def get_chat(chat_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Chat not found")
     
     # Get messages for this chat
-    messages = await Message.find(Message.chat_id == chat_id).sort(+Message.created_at).to_list()
+    messages = await Message.find(Message.chat_id == chat_id).sort("created_at").to_list()
     
     return {
         "id": str(chat.id),
         "title": chat.title,
         "updated_at": chat.updated_at,
-        "messages": [{
-            "content": msg.content,
-            "from_user": msg.from_user,
-            "created_at": msg.created_at,
-            "status": msg.status,
-            "is_complete": msg.is_complete
-        } for msg in messages]
+        "messages": messages
     }
 
 @app.delete("/chat/{chat_id}")
@@ -300,59 +307,44 @@ async def send_message_to_chat(chat_id: str, request: Request, body: SendMessage
     chat = await Chat.get(chat_id)
     if not chat or chat.user_id != str(user.id):
         raise HTTPException(status_code=404, detail="Chat not found")
-    
+
+    tokens = _count_tokens(body.message)
     # Save user message
     user_message = Message(
         chat_id=chat_id,
         from_user=True,
         content=body.message,
         model="user",
-        created_at=datetime.now()
+        created_at=datetime.now(),
+        tokens=tokens
     )
     await user_message.insert()
     
     # Route to appropriate task based on provider
     if body.provider == "google":
-        # Enqueue Celery task for Gemini AI response generation with optional search
-        task = generate_ai_response.delay(chat_id, user.email, body.enable_search)
-        print(f"Enqueued Gemini AI response task {task.id} for chat {chat_id} (search: {body.enable_search})")
-        
-        return {
-            "message": "Message sent successfully",
-            "task_id": task.id,
-            "user_message_id": str(user_message.id),
-            "search_enabled": body.enable_search,
-            "model": body.model,
-            "provider": body.provider
-        }
+        task = generate_gemini_response.delay(chat_id, user.email, body.enable_search, body.model)
+        print(f"Enqueued Gemini task {task.id} for chat {chat_id} (search: {body.enable_search}, model: {body.model})")
+        search_enabled = body.enable_search
     elif body.provider == "openrouter":
-        # Enqueue Celery task for OpenRouter AI response generation
         task = generate_openrouter_response.delay(chat_id, user.email, body.model)
-        print(f"Enqueued OpenRouter AI response task {task.id} for chat {chat_id} (model: {body.model})")
-        
-        return {
-            "message": "Message sent successfully",
-            "task_id": task.id,
-            "user_message_id": str(user_message.id),
-            "search_enabled": False,  # OpenRouter doesn't support search yet
-            "model": body.model,
-            "provider": body.provider
-        }
+        print(f"Enqueued OpenRouter task {task.id} for chat {chat_id} (model: {body.model})")
+        search_enabled = False
     elif body.provider == "github":
-        # Enqueue Celery task for GitHub AI response generation
         task = generate_github_response.delay(chat_id, user.email, body.model)
-        print(f"Enqueued GitHub AI response task {task.id} for chat {chat_id} (model: {body.model})")
-        
-        return {
-            "message": "Message sent successfully",
-            "task_id": task.id,
-            "user_message_id": str(user_message.id),
-            "search_enabled": False,  # GitHub doesn't support search
-            "model": body.model,
-            "provider": body.provider
-        }
+        print(f"Enqueued GitHub task {task.id} for chat {chat_id} (model: {body.model})")
+        search_enabled = False
     else:
         raise HTTPException(status_code=400, detail=f"Unsupported provider: {body.provider}")
+    
+    return {
+        "message": "Message sent successfully",
+        "task_id": task.id,
+        "user_message_id": str(user_message.id),
+        "search_enabled": search_enabled,
+        "model": body.model,
+        "provider": body.provider,
+        "tokens": tokens
+    }
 
 @app.get("/sse/chat/{chat_id}")
 async def stream_chat_messages(
@@ -526,18 +518,26 @@ async def get_all_available_models():
     try:
         gemini_models = [
             {
-                "id": "gemini-2.0-flash",
-                "name": "Gemini 2.0 Flash",
+                "id": "gemini-2.5-flash-preview-05-20",
+                "name": "Gemini 2.5 Flash",
                 "provider": "google",
                 "supports_search": True,
                 "description": "Google's latest multimodal AI model"
             },
+
             {
-                "id": "gemini-1.5-pro",
-                "name": "Gemini 1.5 Pro",
+                "id": "gemini-2.0-flash",
+                "name": "Gemini 2.0 Flash",
+                "provider": "google",
+                "supports_search": True,
+                "description": "Google's older multimodal AI model"
+            },
+            {
+                "id": "gemini-2.0-flash-lite",
+                "name": "Gemini 2.0 Lite",
                 "provider": "google", 
                 "supports_search": True,
-                "description": "Google's advanced reasoning model"
+                "description": "Google's older lightweight multimodal AI model"
             }
         ]
         models.extend(gemini_models)
@@ -964,6 +964,178 @@ async def transcribe_voice(request: Request, body: VoiceTranscriptionRequest):
     except Exception as e:
         print(f"Voice transcription error: {e}")
         raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
+
+@app.post("/chat/{chat_id}/terminate")
+async def terminate_chat_generation(chat_id: str, request: Request, body: TerminateTaskRequest):
+    """
+    Terminate a running AI generation task and update message status.
+    """
+    user = await get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    # Verify chat ownership
+    chat = await Chat.get(chat_id)
+    if not chat or chat.user_id != str(user.id):
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    try:
+        # Set the cancellation flag for cooperative cancellation
+        set_task_cancelled(body.task_id)
+        print(f"Set cancellation flag for task {body.task_id}")
+        
+        # Find the most recent AI message that's streaming
+        latest_message = await Message.find(
+            Message.chat_id == chat_id,
+            Message.from_user == False,
+            Message.status == "streaming"
+        ).sort("-created_at").limit(1).to_list()
+        
+        if latest_message:
+            # Update message status to terminated
+            message = latest_message[0]
+            message.status = "terminated"
+            message.is_complete = False
+            await message.save()
+            print(f"Updated message {message.id} status to terminated")
+        
+        # Clean up Redis stream
+        global redis_client
+        stream_name = f"chat:{chat_id}:stream"
+        try:
+            # Send termination signal to stream using the global async Redis client
+            await redis_client.xadd(stream_name, {
+                "type": "terminated",
+                "task_id": body.task_id,
+                "message": "Generation terminated by user",
+                "timestamp": datetime.now().isoformat()
+            })
+            print(f"Sent termination signal to Redis stream: {stream_name}")
+            
+        except Exception as e:
+            print(f"Error sending termination signal to Redis: {e}")
+        
+        return {
+            "status": "terminated",
+            "task_id": body.task_id,
+            "message": "Task terminated successfully"
+        }
+        
+    except Exception as e:
+        print(f"Error terminating task {body.task_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to terminate task: {str(e)}")
+
+@app.post("/search/titles")
+async def search_chat_titles(request: Request, body: SearchRequest):
+    """
+    Search in chat titles (based on first message content).
+    Returns chats where the title matches the search query.
+    """
+    user = await get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    if not body.query.strip():
+        return {"results": []}
+    
+    # Search in chat titles using case-insensitive regex
+    chats = await Chat.find(
+        Chat.user_id == str(user.id),
+        {"title": {"$regex": body.query.strip(), "$options": "i"}}
+    ).sort("-updated_at").limit(body.limit).to_list()
+    
+    # Get first message for each chat for context
+    results = []
+    for chat in chats:
+        first_message = await Message.find(
+            Message.chat_id == str(chat.id),
+            Message.from_user == True
+        ).sort("created_at").limit(1).to_list()
+        
+        message_count = await Message.find(Message.chat_id == str(chat.id)).count()
+        
+        results.append({
+            "chat_id": str(chat.id),
+            "title": chat.title,
+            "updated_at": chat.updated_at,
+            "message_count": message_count,
+            "first_message": first_message[0].content if first_message else "",
+            "match_type": "title"
+        })
+    
+    return {"results": results}
+
+@app.post("/search/messages")
+async def search_chat_messages(request: Request, body: SearchRequest):
+    """
+    Search within all message content across all user's chats.
+    Returns messages that match the search query with chat context.
+    """
+    user = await get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    if not body.query.strip():
+        return {"results": []}
+    
+    # Get all user's chats first
+    user_chats = await Chat.find(Chat.user_id == str(user.id)).to_list()
+    chat_ids = [str(chat.id) for chat in user_chats]
+    
+    if not chat_ids:
+        return {"results": []}
+    
+    # Search in message content using case-insensitive regex
+    messages = await Message.find(
+        {"chat_id": {"$in": chat_ids}},
+        {"content": {"$regex": body.query.strip(), "$options": "i"}}
+    ).sort("-created_at").limit(body.limit).to_list()
+    
+    # Group messages by chat and get chat info
+    results = []
+    chat_cache = {str(chat.id): chat for chat in user_chats}
+    
+    for message in messages:
+        chat = chat_cache.get(message.chat_id)
+        if not chat:
+            continue
+            
+        # Get message count for this chat
+        message_count = await Message.find(Message.chat_id == message.chat_id).count()
+        
+        # Highlight the search term in content (simple version)
+        content = message.content
+        query_lower = body.query.strip().lower()
+        
+        # Find the position of the match for context
+        content_lower = content.lower()
+        match_pos = content_lower.find(query_lower)
+        
+        # Extract context around the match (150 chars before and after)
+        if match_pos != -1:
+            start = max(0, match_pos - 150)
+            end = min(len(content), match_pos + len(body.query) + 150)
+            context = content[start:end]
+            if start > 0:
+                context = "..." + context
+            if end < len(content):
+                context = context + "..."
+        else:
+            # Fallback: just take first 300 chars
+            context = content[:300] + ("..." if len(content) > 300 else "")
+        
+        results.append({
+            "chat_id": str(chat.id),
+            "title": chat.title,
+            "updated_at": chat.updated_at,
+            "message_count": message_count,
+            "message_content": context,
+            "message_from_user": message.from_user,
+            "message_created_at": message.created_at,
+            "match_type": "message"
+        })
+    
+    return {"results": results}
 
 if __name__ == "__main__":
     import uvicorn

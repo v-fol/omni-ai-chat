@@ -5,10 +5,12 @@ import { cn } from '@/lib/utils';
 import { useTheme } from '@/lib/theme-context';
 import { sidebarCollapsedAtom, userAtom, chatPositionAtom } from '@/lib/atoms';
 import { useEffect, useState } from 'react';
-import { ChevronLeft, Menu, LogOut } from 'lucide-react';
+import { Plus, Search, SidebarOpen, LogOut, PanelLeft, PanelLeftClose, MessageCircleCode } from 'lucide-react';
 import { GitHubLoginButton } from '@/components/auth/GitHubLoginButton';
 import { ChatList } from '@/components/chat/ChatList';
+import { SearchModal } from '@/components/chat/SearchModal';
 import { useAuthStatus, useLogout } from '@/lib/queries';
+import { useNavigate } from '@tanstack/react-router';
 
 export function ChatLayout({ children }: { children: React.ReactNode }) {
   const [sidebarCollapsed, setSidebarCollapsed] = useAtom(sidebarCollapsedAtom);
@@ -16,8 +18,10 @@ export function ChatLayout({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useAtom(userAtom);
   const [chatPosition] = useAtom(chatPositionAtom);
   const [sheetOpen, setSheetOpen] = useState(false);
+  const [searchModalOpen, setSearchModalOpen] = useState(false);
   const { data: authData } = useAuthStatus();
   const logoutMutation = useLogout();
+  const navigate = useNavigate();
 
   useEffect(() => {
     setUser(authData ?? null);
@@ -26,105 +30,244 @@ export function ChatLayout({ children }: { children: React.ReactNode }) {
   const handleLogout = () => {
     logoutMutation.mutate();
     setUser(null);
+    // refresh the page
+    window.location.reload();
+  };
+
+  const handleNewChat = () => {
+    if (!user) return;
+    if (chatPosition === 'right') {
+      setSheetOpen(false);
+    }
+    navigate({ to: '/' });
+  };
+
+  const handleSearchClick = () => {
+    if (!user) return;
+    setSearchModalOpen(true);
+    if (chatPosition === 'right') {
+      setSheetOpen(false);
+    }
   };
 
   // Sidebar content component that can be reused
-  const SidebarContent = () => (
+  const SidebarContent = ({ onChatClick }: { onChatClick?: () => void }) => (
     <div className="flex flex-col h-full">
-      <div className="mb-6">
-        <div className="flex items-center justify-between mb-4">
-          <Button 
-            variant="ghost" 
-            size="icon" 
-            onClick={() => {
-              if (chatPosition === 'right') {
-                setSheetOpen(false);
-              } else {
-                setSidebarCollapsed(true);
-              }
-            }} 
-            className="size-6" 
-            aria-label="Close sidebar"
+      {/* Header with New Chat and Search */}
+      <div className="flex items-center justify-between w-full mb-4">
+      <div className="text-lg font-bold flex items-center gap-1 flex-shrink-0">
+        <MessageCircleCode className="w-5 h-5 flex-shrink-0" />
+        <span className="whitespace-nowrap">Omni Chat</span>
+      </div>
+       {/* Close button for regular sidebar mode */}
+       {chatPosition !== 'right' && (
+          <div className="flex justify-end">
+            <Button 
+              variant="ghost" 
+              size="icon" 
+              onClick={() => setSidebarCollapsed(true)}
+              className="size-6" 
+              aria-label="Close sidebar"
+            >
+              <PanelLeftClose className="w-4 h-4" />
+            </Button>
+          </div>
+        )}
+        
+      </div>
+
+      <div className="mb-6 space-y-3">
+       
+        
+        {/* Action buttons */}
+        <div className="space-y-2">
+          <Button
+            onClick={handleNewChat}
+            disabled={!user}
+            className={cn(
+              "w-full justify-start gap-3 h-10",
+              theme === 'dark' 
+                ? "bg-neutral-700 hover:bg-neutral-600 text-neutral-100" 
+                : "bg-neutral-200 hover:bg-neutral-300 text-neutral-900",
+              !user && "opacity-50 cursor-not-allowed"
+            )}
           >
-            <ChevronLeft className="w-3 h-3" />
+            <Plus className="w-4 h-4" />
+            New Chat
+          </Button>
+          
+          <Button
+            variant="outline"
+            onClick={handleSearchClick}
+            disabled={!user}
+            className={cn(
+              "w-full justify-start gap-3 h-10",
+              theme === 'dark' 
+                ? "border-neutral-600 hover:bg-neutral-700" 
+                : "border-neutral-300 hover:bg-neutral-100",
+              !user && "opacity-50 cursor-not-allowed"
+            )}
+          >
+            <Search className="w-4 h-4" />
+            Search
           </Button>
         </div>
-        {user ? (
-          <>
-            <div className="flex items-center gap-3 p-2 rounded-lg bg-neutral-800/50">
-              <img src={user.avatar_url} alt={user.name} className="w-8 h-8 rounded-full" />
-              <div className="flex-1 min-w-0">
-                <div className="font-medium truncate">{user.name}</div>
-                <div className="text-sm text-neutral-400 truncate">{user.login}</div>
-              </div>
-            </div>
-            <Button variant="ghost" size="sm" onClick={handleLogout} className="w-full mt-2 text-red-500 hover:text-red-600 hover:bg-red-500/10">
-              <LogOut className="w-4 h-4 mr-2" />
-              Sign Out
-            </Button>
-          </>
-        ) : (
-          <GitHubLoginButton />
-        )}
       </div>
+
+      {/* Chat List */}
       <div className="flex-1 overflow-hidden">
-        <ChatList />
+        <ChatList onChatClick={onChatClick} />
+      </div>
+
+      {/* User Profile Section */}
+      <div className="mt-auto pt-4 border-t border-neutral-200 dark:border-neutral-700">
+        {user ? (
+          <div className="space-y-3 w-full">
+            <div className="flex items-center gap-1">
+              <Button
+                variant="ghost"
+                className="h-auto  p-2 justify-start text-left hover:bg-transparent"
+              >
+              <img 
+                src={user.avatar_url} 
+                alt={user.name} 
+                className="w-8 h-8 rounded-full border-2 border-neutral-200 dark:border-neutral-600" 
+              />
+              <div className="flex-1 min-w-0">
+                    <div>
+                  <div className="flex items-center gap-2">
+                    <div className="font-medium text-sm truncate">{user.name}</div>
+                    {user && (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={handleLogout}
+                  className="h-auto py-1 ml-1 hover:!bg-red-400 "
+                >
+                  <LogOut className="w-4 h-4" />
+                </Button>
+                )}
+
+                </div>
+                    <div className="text-xs text-neutral-500 truncate">@{user.login}</div>
+                  </div>
+              </div>
+                </Button>
+
+               
+              
+            </div>
+            <div className="text-xs text-neutral-400 text-center font-bold">
+              v0.0.1
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <GitHubLoginButton />
+            <div className="text-xs text-neutral-400 text-center">
+              v0.0.0
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
 
   return (
     <div className={cn(
-      "flex h-screen w-full relative ",
-      theme === 'dark' ? 'bg-background-dark-primary' : 'bg-background-primary'
-    )}>
+      "flex h-screen w-full relative",
+    )}
+    style={{
+      backgroundColor: theme === 'dark' ? 'rgb(19, 19, 19)' : 'rgb(243, 244, 246)'
+    }}
+    >
       {chatPosition !== 'right' ? (
-      <div className={cn(
-        "transition-all duration-300 flex flex-col border-r z-20 overflow-hidden dark:bg-neutral-800 dark:text-neutral-100 light:bg-neutral-100 light:text-neutral-900",
-        sidebarCollapsed ? 'w-0 min-w-0 opacity-0 pointer-events-none' : 'p-4 w-64 opacity-100',
-        theme === 'dark' ? 'bg-background-dark-secondary border-border-dark' : 'bg-background-secondary border-border-light'
-      )}>
-        <div className={cn("flex flex-col h-full", sidebarCollapsed && 'opacity pointer-events-none')}>
-          <SidebarContent />
+        <div className={cn(
+          "transition-all duration-300 flex flex-col border-r z-20 overflow-hidden",
+          sidebarCollapsed ? 'w-0 min-w-0 opacity-0 pointer-events-none' : 'p-4 w-64 opacity-100',
+          theme === 'dark' 
+            ? 'bg-neutral-900 border-neutral-700 text-neutral-100' 
+            : 'bg-neutral-50 border-neutral-200 text-neutral-900'
+        )}>
+          <div className={cn("flex flex-col h-full", sidebarCollapsed && 'opacity-0 pointer-events-none')}>
+            <SidebarContent />
+          </div>
         </div>
-      </div>
       ) : (
-
-        <Sheet open={sheetOpen} onOpenChange={setSheetOpen} >
+        <Sheet open={sheetOpen} onOpenChange={setSheetOpen}>
           <SheetTrigger asChild>
             <Button
               variant="ghost"
               size="icon"
-              className="fixed top-4 left-4 z-30 bg-background shadow-md border border-border size-6"
+              className="fixed top-4 left-4 z-30 bg-background shadow-md border border-border size-8"
               aria-label="Open sidebar"
             >
-              <Menu className="w-3 h-3" />
+              <SidebarOpen className="w-4 h-4" />
             </Button>
           </SheetTrigger>
           <SheetContent 
             side="left" 
-            className={"w-80 p-4 dark:bg-neutral-800 bg-neutral-50"}
+            className={cn(
+              "w-80 p-4",
+              theme === 'dark' ? "bg-neutral-900" : "bg-neutral-50"
+            )}
           >
-            <SidebarContent />
+            <SidebarContent onChatClick={() => setSheetOpen(false)} />
           </SheetContent>
         </Sheet>
       )}
       
-      {sidebarCollapsed && chatPosition !== 'right' && (
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={() => setSidebarCollapsed(false)}
-          className="fixed top-4 left-4 z-30 bg-background shadow-md border border-border size-6"
-          aria-label="Open sidebar"
-        >
-          <Menu className="w-3 h-3" />
-        </Button>
+      {((sidebarCollapsed && chatPosition !== 'right') || (chatPosition === 'right' && !sheetOpen)) && (
+        <div className="fixed top-4 left-4 z-30">
+          <div className={cn(
+            "flex flex-col rounded-lg border shadow-md overflow-hidden",
+            theme === 'dark' ? "bg-neutral-900 border-neutral-700" : "bg-white border-neutral-200"
+          )}>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={chatPosition === 'right' ? () => setSheetOpen(true) : () => setSidebarCollapsed(false)}
+              disabled={!user && chatPosition === 'right'}
+              className="size-8 rounded-none border-b border-neutral-200 dark:border-neutral-700"
+              aria-label="Open sidebar"
+            >
+              <SidebarOpen className="w-4 h-4" />
+            </Button>
+            
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={handleNewChat}
+              disabled={!user}
+              className="size-8 rounded-none border-b border-neutral-200 dark:border-neutral-700"
+              aria-label="New chat"
+            >
+              <Plus className="w-4 h-4" />
+            </Button>
+            
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={handleSearchClick}
+              disabled={!user}
+              className="size-8 rounded-none"
+              aria-label="Search"
+            >
+              <Search className="w-4 h-4" />
+            </Button>
+          </div>
+        </div>
       )}
 
-      <main className="flex-1 flex h-full dark:bg-neutral-800 dark:text-neutral-100 light:bg-neutral-100 light:text-neutral-900">
+      <main className="flex-1 flex h-full">
         {children}
       </main>
+
+      {/* Search Modal */}
+      <SearchModal 
+        open={searchModalOpen} 
+        onOpenChange={setSearchModalOpen} 
+      />
     </div>
   );
 }

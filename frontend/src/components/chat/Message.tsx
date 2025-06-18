@@ -17,6 +17,8 @@ import sql from 'react-syntax-highlighter/dist/esm/languages/prism/sql';
 import golang from 'react-syntax-highlighter/dist/esm/languages/prism/go';
 import rust from 'react-syntax-highlighter/dist/esm/languages/prism/rust';
 import Markdown from 'react-markdown';
+import { TextShimmerWave } from '@/components/motion-primitives/text-shimmer-wave';
+
 
 import '../../markdown.css';
 
@@ -38,8 +40,11 @@ interface MessageProps {
   content: string;
   isUser: boolean;
   timestamp: Date;
-  status?: 'complete' | 'incomplete' | 'streaming';
+  model: string;
+  completedAt?: Date; // When the message was completed (for AI messages)
+  status?: 'complete' | 'incomplete' | 'streaming' | 'terminated';
   isComplete?: boolean;
+  tokens?: number; // Token count for this message
 }
 
 interface CustomCodeProps extends React.HTMLAttributes<HTMLElement> {
@@ -48,7 +53,7 @@ interface CustomCodeProps extends React.HTMLAttributes<HTMLElement> {
   children?: React.ReactNode;
 }
 
-export function Message({ content, isUser, timestamp, status, isComplete }: MessageProps) {
+export function Message({ content, isUser, timestamp, model, completedAt, status, isComplete, tokens }: MessageProps) {
   const { theme } = useTheme();
   const [copiedStates, setCopiedStates] = useState<Record<string, boolean>>({});
   const [displayedContent, setDisplayedContent] = useState('');
@@ -56,10 +61,22 @@ export function Message({ content, isUser, timestamp, status, isComplete }: Mess
   const contentRef = useRef<HTMLDivElement>(null);
   const isStreaming = status === 'streaming';
 
+  // Calculate tokens per second for AI messages
+  const tokensPerSecond = useMemo(() => {
+    if (!tokens || isUser || !completedAt || !timestamp) return undefined;
+    
+    const durationMs = completedAt.getTime() - timestamp.getTime();
+    const durationSeconds = durationMs / 1000;
+    
+    if (durationSeconds <= 0) return undefined;
+    
+    return Math.round((tokens / durationSeconds) * 10) / 10; // Round to 1 decimal place
+  }, [tokens, isUser, completedAt, timestamp]);
+
   // Smooth content streaming with height animation
   useEffect(() => {
-    if (isUser || status === 'complete') {
-      // For user messages or completed AI messages, show everything immediately
+    if (isUser || status === 'complete' || status === 'terminated') {
+      // For user messages, completed AI messages, or terminated messages, show everything immediately
       setDisplayedContent(content);
       setContainerHeight(undefined); // Let it be auto
       return;
@@ -153,7 +170,7 @@ export function Message({ content, isUser, timestamp, status, isComplete }: Mess
           </SyntaxHighlighter>
         </div>
       ) : !inline ? (
-        <span className="dark:bg-neutral-900 bg-neutral-300 bg-opacity-50 dark:text-slate-300 text-neutral-900 pt-0.5 my-0.5 px-2 mx-1 rounded-lg text-sm inline-flex max-w-[600px] overflow-x-auto scrollbar-thin scrollbar-thumb-neutral-600 scrollbar-track-neutral-900" {...props}>
+        <span className="dark:bg-neutral-800 bg-neutral-300 bg-opacity-50 dark:text-slate-300 text-neutral-900 pt-0.5 my-0.5 px-2 mx-1 rounded-lg text-sm inline-flex max-w-[600px] overflow-x-auto scrollbar-thin scrollbar-thumb-neutral-600 scrollbar-track-neutral-900" {...props}>
           <code className="font-mono">{children}</code>
         </span>
       ) : (
@@ -231,10 +248,16 @@ export function Message({ content, isUser, timestamp, status, isComplete }: Mess
               {isStreaming && !isUser && (
                 // fade out effect 
                 <>
-                <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t h-28 from-neutral-800 to-transparent " />
-                <span className="inline-block w-2 h-4 bg-neutral-500 dark:bg-neutral-400 ml-1 animate-pulse" />
+                <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t h-28  dark:from-[rgba(19,19,19,0.5)] dark:to-transparent " />
                 </>
               )}
+              {/* Streaming text when before receiving the message */}
+              {isStreaming && !isUser && content.length === 0 && (
+
+                    <TextShimmerWave className='font-mono text-sm' duration={1}>
+                      Generating...
+                    </TextShimmerWave>
+                )}
             </div>
           </div>
         </div>
@@ -253,9 +276,37 @@ export function Message({ content, isUser, timestamp, status, isComplete }: Mess
             })}
           </span>
 
+          {/* Model */}
+          {!isUser && model && (
+            <>
+              <span>•</span>
+              <span>{model}</span>
+            </>
+          )}
+
+          {/* Token count - only show for AI messages with token data */}
+          {tokens !== undefined && (
+            <>
+              <span>•</span>
+              <span title={`${tokens} tokens${tokensPerSecond ? ` at ${tokensPerSecond} tokens/sec` : ''}`}>
+                {tokens} tokens{tokensPerSecond ? ` (${tokensPerSecond} tokens/sec)` : ''}
+              </span>
+            </>
+          )}
+
+          {/* Time to complete */}
+          {completedAt && (
+            <>
+              <span>•</span>
+              <span>
+                {Math.round((completedAt.getTime() - timestamp.getTime()) / 10) / 100}s
+              </span>
+            </>
+          )}
+          
+
           {/* Action buttons - only show on hover */}
           <div className="flex gap-1">
-            {!isUser && (
               <button
                 className="p-1 hover:text-neutral-300 rounded transition-colors duration-200"
                 title="Copy message"
@@ -267,7 +318,6 @@ export function Message({ content, isUser, timestamp, status, isComplete }: Mess
                   <CopyIcon className="w-3 h-3" />
                 )}
               </button>
-            )}
           </div>
         </div>
       </div>
@@ -296,6 +346,14 @@ export function Message({ content, isUser, timestamp, status, isComplete }: Mess
         <div className="absolute top-2 right-2 flex items-center text-sm text-red-500">
           <span className="mr-1">⚠️</span>
           <span>Message incomplete</span>
+        </div>
+      )}
+
+      {/* Status indicator for terminated messages */}
+      {!isUser && status === 'terminated' && (
+        <div className="absolute top-2 right-2 flex items-center text-sm text-orange-500">
+          <span className="mr-1">🛑</span>
+          <span>Generation stopped</span>
         </div>
       )}
     </div>
