@@ -12,26 +12,33 @@ import { Switch } from "@/components/ui/switch"
 import { useAtom } from 'jotai'
 import { chatPositionAtom, isAutoScrollAtom } from '@/lib/atoms'
 import { useTheme } from '@/lib/theme-context'
-import { Settings, Sun, Moon, LayoutGrid, ScrollText } from "lucide-react"
+import { Settings, Sun, Moon, ScrollText, PanelTop, PanelBottom, PanelRight, LayoutPanelLeft } from "lucide-react"
 import { Tooltip , TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
+import { cn } from '@/lib/utils'
 
 export function ChatSettingsPopover() {
   const [chatPosition, setChatPosition] = useAtom(chatPositionAtom)
   const [isAutoScroll, setIsAutoScroll] = useAtom(isAutoScrollAtom)
   const { theme, toggleTheme } = useTheme()
 
-  const handlePositionChange = () => {
-    const positions = ['bottom', 'top', 'right'] as const
-    const currentIndex = positions.indexOf(chatPosition)
-    const nextIndex = (currentIndex + 1) % positions.length
-    setChatPosition(positions[nextIndex])
+  const handlePositionChange = (position: 'bottom' | 'top' | 'right') => {
+    setChatPosition(position)
   }
 
-  const getPositionLabel = () => {
-    switch (chatPosition) {
+  const getPositionIcon = (position: 'bottom' | 'top' | 'right') => {
+    switch (position) {
+      case 'bottom': return PanelBottom
+      case 'top': return PanelTop  
+      case 'right': return PanelRight
+      default: return PanelBottom
+    }
+  }
+
+  const getPositionLabel = (position: 'bottom' | 'top' | 'right') => {
+    switch (position) {
       case 'bottom': return 'Bottom'
       case 'top': return 'Top'
-      case 'right': return 'Right'
+      case 'right': return 'Side'
       default: return 'Bottom'
     }
   }
@@ -46,7 +53,7 @@ export function ChatSettingsPopover() {
             </Button>
           </TooltipTrigger>
         </DropdownMenuTrigger>
-        <DropdownMenuContent className="w-56" align="start">
+        <DropdownMenuContent className="w-64" align="start">
           <DropdownMenuLabel>Chat Settings</DropdownMenuLabel>
           <DropdownMenuSeparator />
           
@@ -59,12 +66,52 @@ export function ChatSettingsPopover() {
               </div>
             </DropdownMenuItem>
 
-            {/* Position Toggle */}
-            <DropdownMenuItem onClick={handlePositionChange} className="cursor-pointer">
-              <div className="flex items-center gap-2 w-full">
-                <LayoutGrid className="w-4 h-4" />
-                <span className="flex-1">Input Position</span>
-                <span className="text-xs text-neutral-500">{getPositionLabel()}</span>
+            {/* Layout Position Multi-Select */}
+            <DropdownMenuItem 
+              onClick={(e) => e.preventDefault()} 
+              className="cursor-default focus:bg-transparent"
+            >
+              <div className="flex flex-col gap-3 w-full">
+                <div className="flex items-center gap-2">
+                  <LayoutPanelLeft className="w-4 h-4" />
+                  <span className="flex-1">Input Position</span>
+                </div>
+                
+                <div className="flex gap-2 w-full">
+                  {(['bottom', 'top', 'right'] as const).map((position) => {
+                    const IconComponent = getPositionIcon(position)
+                    const isActive = chatPosition === position
+                    
+                    return (
+                      <Tooltip key={position}>
+                        <TooltipTrigger asChild>
+                          <Button
+                            variant={isActive ? "default" : "outline"}
+                            size="sm"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              handlePositionChange(position)
+                            }}
+                            className={cn(
+                              "flex-1 flex  items-center gap-1 h-auto py-2 px-1",
+                              isActive && "bg-blue-600 hover:bg-blue-700 text-white",
+                              !isActive && "hover:bg-neutral-100 dark:hover:bg-neutral-700"
+                            )}
+                          >
+                            <IconComponent className={cn(
+                              "w-4 h-4",
+                              isActive && "text-white"
+                            )} />
+                            <span className="text-xs">{getPositionLabel(position)}</span>
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <p>Place input at {getPositionLabel(position).toLowerCase()}</p>
+                        </TooltipContent>
+                      </Tooltip>
+                    )
+                  })}
+                </div>
               </div>
             </DropdownMenuItem>
 

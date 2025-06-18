@@ -170,7 +170,7 @@ export function Message({ content, isUser, timestamp, model, completedAt, status
           </SyntaxHighlighter>
         </div>
       ) : !inline ? (
-        <span className="dark:bg-neutral-900 bg-neutral-300 bg-opacity-50 dark:text-slate-300 text-neutral-900 pt-0.5 my-0.5 px-2 mx-1 rounded-lg text-sm inline-flex max-w-[600px] overflow-x-auto scrollbar-thin scrollbar-thumb-neutral-600 scrollbar-track-neutral-900" {...props}>
+        <span className="dark:bg-neutral-800 bg-neutral-300 bg-opacity-50 dark:text-slate-300 text-neutral-900 pt-0.5 my-0.5 px-2 mx-1 rounded-lg text-sm inline-flex max-w-[600px] overflow-x-auto scrollbar-thin scrollbar-thumb-neutral-600 scrollbar-track-neutral-900" {...props}>
           <code className="font-mono">{children}</code>
         </span>
       ) : (
@@ -248,7 +248,7 @@ export function Message({ content, isUser, timestamp, model, completedAt, status
               {isStreaming && !isUser && (
                 // fade out effect 
                 <>
-                <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t h-28 from-neutral-800 to-transparent " />
+                <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t h-28  dark:from-[rgba(19,19,19,0.5)] dark:to-transparent " />
                 </>
               )}
               {/* Streaming text when before receiving the message */}

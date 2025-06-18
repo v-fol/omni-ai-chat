@@ -458,10 +458,11 @@ function ChatComponent() {
     <div className={cn("flex-1 flex", chatPosition === 'right' ? 'flex-row' : 'flex-col', chatPosition === 'top' && 'flex-col-reverse')}>
       <div className="flex-1 min-h-0 ">
         <ScrollArea 
-          className="h-full dark:bg-neutral-800 dark:text-neutral-100" 
+          className="h-full  dark:text-neutral-100" 
+          type="always"
           ref={scrollAreaRef as React.RefObject<HTMLDivElement>}
         >
-          <div className="p-6 w-3/4 mx-auto space-y-4">
+          <div className="p-6 w-3/4 max-w-4xl mx-auto space-y-4">
             {messages.map((message, index) => (
               <div key={index} className="message-item">
                 <Message

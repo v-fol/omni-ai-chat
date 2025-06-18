@@ -50,7 +50,7 @@ export function ModelSelector({ className }: ModelSelectorProps) {
           variant="outline"
           size="sm"
           className={cn(
-            "min-w-[140px] justify-between text-left font-normal",
+            "min-w-[140px] max-w-[200px] justify-between text-left font-normal",
             className
           )}
         >

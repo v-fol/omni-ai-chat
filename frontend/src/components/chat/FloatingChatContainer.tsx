@@ -51,29 +51,29 @@ interface FloatingChatContainerProps {
 const layoutConfig = {
   bottom: {
     containerClass: "w-full max-w-4xl mx-auto px-6 mb-4",
-    innerClass: "flex flex-col gap-4 p-2",
+    innerClass: "flex flex-col  p-2",
     inputWrapperClass: "flex-1",
     controlsClass: "flex justify-between mb-1 mx-1",
-    inputRows: 1,
+    inputRows: 2,
     inputHeight: "min-h-[44px]",
     showNavigation: false,
   },
   top: {
     containerClass: "w-full max-w-4xl mx-auto px-6 mt-4",
-    innerClass: "flex items-center gap-3 p-4",
+    innerClass: "flex flex-col  p-2",
     inputWrapperClass: "flex-1",
-    controlsClass: "flex items-center gap-2 mb-2",
-    inputRows: 2,
-    inputHeight: "min-h-[64px]",
+    controlsClass: "flex justify-between mb1-1 mx-1",
+    inputRows: 1,
+    inputHeight: "min-h-[44px]",
     showNavigation: false,
   },
   right: {
-    containerClass: "w-xs h-[100vh] flex ",
+    containerClass: "w-xs h-[98vh] flex mt-2 mb-2 mx-2",
     innerClass: "flex flex-col gap-4 p-6",
-    inputWrapperClass: "flex-1",
-    controlsClass: "flex flex-wrap items-center gap-2",
+    inputWrapperClass: "",
+    controlsClass: "flex justify-between w-full",
     inputRows: 6,
-    inputHeight: "min-h-[120px]",
+    inputHeight: "min-h-[44px] ",
     showNavigation: true,
   },
 };
@@ -160,9 +160,15 @@ export function FloatingChatContainer({
     <div className={config.controlsClass}>
         <div className="flex items-center gap-2">
 
-      <ChatSettingsPopover />
+      {chatPosition !== "right" && (
+        <ChatSettingsPopover />
+      )}
 
       <ModelSelector className="rounded-full" />
+
+      {chatPosition === "right" && (
+        <ChatSettingsPopover />
+      )}
 
       <Tooltip>
         <TooltipTrigger asChild>
@@ -195,7 +201,7 @@ export function FloatingChatContainer({
       <div>
 
       {/* Action Buttons */}
-      {showVoiceButton && (
+      {showVoiceButton && chatPosition !== "right" && (
         <VoiceRecordButton
           onTranscriptionComplete={handleVoiceTranscription}
           disabled={isLoading}
@@ -205,7 +211,7 @@ export function FloatingChatContainer({
 
 
       
-      {showSubmitButton && (
+      {showSubmitButton && chatPosition !== "right" && (
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
@@ -225,7 +231,7 @@ export function FloatingChatContainer({
         </Tooltip>
       )}
       
-      {showTerminateButton && (
+      {showTerminateButton && chatPosition !== "right" && (
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
@@ -417,20 +423,11 @@ export function FloatingChatContainer({
                 <div className="space-y-1">
                   <div className="flex items-center gap-1 text-xs text-neutral-500">
                     <User className="w-3 h-3" />
-                    <span className="font-mono">
-                      {item.timestamp.toLocaleTimeString([], {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })}
-                    </span>
-                  </div>
-                  <div className="text-xs font-medium text-neutral-800 dark:text-neutral-200 line-clamp-2">
+                    
                     {item.question}
                   </div>
                   <div className="flex items-center gap-1 text-xs text-neutral-500">
                     <Bot className="w-3 h-3" />
-                  </div>
-                  <div className="text-xs text-neutral-600 dark:text-neutral-400 line-clamp-2">
                     {item.answer}
                   </div>
                 </div>
@@ -442,16 +439,7 @@ export function FloatingChatContainer({
         {messages.length > 0 && (
           <div className="mt-3 pt-2 border-t border-neutral-300 dark:border-neutral-700">
             <div className="text-xs text-neutral-500">
-              {
-                navigationItems.filter((item) => item.type === "conversation")
-                  .length
-              }{" "}
-              topic
-              {navigationItems.filter((item) => item.type === "conversation")
-                .length !== 1
-                ? "s"
-                : ""}{" "}
-              • {messages.length} message{messages.length !== 1 ? "s" : ""}
+              {messages.length} message{messages.length !== 1 ? "s" : ""}
             </div>
           </div>
         )}
@@ -468,7 +456,7 @@ export function FloatingChatContainer({
             )}
             style={{
               top: hoverPosition.top,
-              left: hoverPosition.left - 448 - 8,
+              right: window.innerWidth - hoverPosition.left + 8,
               transform: "translateY(-50%)",
             }}
           >
@@ -506,7 +494,7 @@ export function FloatingChatContainer({
     <div className={config.containerClass}>
       <div
         className={cn(
-          "relative rounded-3xl shadow-2xl backdrop-blur-sm border",
+          "relative rounded-3xl shadow-2xl backdrop-blur-sm border w-full",
           theme === "dark"
             ? "bg-neutral-900/95 border-neutral-700/50"
             : "bg-white/95 border-neutral-200/50",
@@ -529,6 +517,9 @@ export function FloatingChatContainer({
         >
 
           <div className={config.inputWrapperClass}>
+
+          {chatPosition === "right" && controls}
+
             <ChatInput
               theme={theme}
               placeholder={placeholder}
@@ -545,12 +536,62 @@ export function FloatingChatContainer({
         
             {chatPosition !== "right" && controls}
 
-          {chatPosition === "right" && (
-            <>
-              {controls}
-              <ChatNavigation />
-            </>
-          )}
+          <div className="flex justify-end">
+
+            {showVoiceButton && chatPosition === "right" && (
+              <VoiceRecordButton
+              onTranscriptionComplete={handleVoiceTranscription}
+              disabled={isLoading}
+              className="size-8"
+              />
+            )}
+
+          {showSubmitButton && chatPosition === "right" && (
+            <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        onClick={handleSendClick}
+                        size="icon"
+                        className={cn(
+                          "rounded-full size-8 transition-colors",
+                          theme === 'dark' 
+                          ? "bg-white hover:bg-neutral-200 text-black" 
+                          : "bg-black hover:bg-neutral-800 text-white"
+                        )}
+                      >
+                        <Send className="w-4 h-4" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>Send message</TooltipContent>
+                  </Tooltip>
+                )}
+                
+                {showTerminateButton && chatPosition === "right" && (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        onClick={handleTerminateClick}
+                        size="icon"
+                        variant="destructive"
+                        className="rounded-full size-8 bg-red-500 hover:bg-red-600 text-white"
+                        >
+                        <Square className="w-3 h-3" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>Stop generation</TooltipContent>
+                  </Tooltip>
+                )}
+
+                </div>
+
+                {chatPosition === "right" && (
+                  <div className="h-px w-full mb-2 bg-neutral-200 dark:bg-neutral-700" />
+                )}
+
+            {chatPosition === "right" && (
+                <ChatNavigation />
+            )}
+            
         </div>
       </div>
     </div>

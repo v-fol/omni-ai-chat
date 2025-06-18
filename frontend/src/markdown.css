@@ -1,31 +1,54 @@
-/* Custom scrollbar styles for dark theme */
+/* Custom scrollbar styles - theme aware */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 
-::-webkit-scrollbar-track {
+/* Light theme scrollbar */
+:root ::-webkit-scrollbar-track {
+  background: #f5f5f5;
+}
+
+:root ::-webkit-scrollbar-thumb {
+  background: #d1d5db;
+  border-radius: 4px;
+}
+
+:root ::-webkit-scrollbar-thumb:hover {
+  background: #9ca3af;
+}
+
+/* Dark theme scrollbar */
+.dark ::-webkit-scrollbar-track {
   background: #1a1a1a;
 }
 
-::-webkit-scrollbar-thumb {
+.dark ::-webkit-scrollbar-thumb {
   background: #333;
   border-radius: 4px;
 }
 
-::-webkit-scrollbar-thumb:hover {
+.dark ::-webkit-scrollbar-thumb:hover {
   background: #444;
 }
 
 /* Firefox scrollbar styles */
-* {
+:root * {
   scrollbar-width: thin;
-  scrollbar-color: #333 #1a1a1a;
+  scrollbar-color: #d1d5db #f5f5f5; /* thumb track */
 }
 
+.dark * {
+  scrollbar-width: thin;
+  scrollbar-color: #333 #1a1a1a; /* thumb track */
+}
 
 /* List styles */
 li::marker {
-  color: darkgray;
+  color: #6b7280; /* neutral-500 */
+}
+
+.dark li::marker {
+  color: #9ca3af; /* neutral-400 */
 }
 

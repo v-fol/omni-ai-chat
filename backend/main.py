@@ -221,16 +221,22 @@ async def get_chats(request: Request):
         raise HTTPException(status_code=401, detail="Not authenticated")
     
     # Get all chats for the user, sorted by updated_at
-    chats = await Chat.find(Chat.user_id == str(user.id)).sort(-Chat.updated_at).to_list()
+    chats = await Chat.find(Chat.user_id == str(user.id)).sort("-updated_at").to_list()
     
-    # Format the response with more details
-    return {
-        "chats": [{
+    # Get message counts for each chat
+    chat_data = []
+    for chat in chats:
+        message_count = await Message.find(Message.chat_id == str(chat.id)).count()
+        chat_data.append({
             "id": str(chat.id),
             "title": chat.title,
             "created_at": chat.created_at,
-            "updated_at": chat.updated_at
-        } for chat in chats]
+            "updated_at": chat.updated_at,
+            "message_count": message_count
+        })
+    
+    return {
+        "chats": chat_data
     }
 
 @app.get("/chat/{chat_id}")
@@ -245,7 +251,7 @@ async def get_chat(chat_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Chat not found")
     
     # Get messages for this chat
-    messages = await Message.find(Message.chat_id == chat_id).sort(+Message.created_at).to_list()
+    messages = await Message.find(Message.chat_id == chat_id).sort("created_at").to_list()
     
     return {
         "id": str(chat.id),
@@ -979,7 +985,7 @@ async def terminate_chat_generation(chat_id: str, request: Request, body: Termin
             Message.chat_id == chat_id,
             Message.from_user == False,
             Message.status == "streaming"
-        ).sort(-Message.created_at).limit(1).to_list()
+        ).sort("-created_at").limit(1).to_list()
         
         if latest_message:
             # Update message status to terminated
