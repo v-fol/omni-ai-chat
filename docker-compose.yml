@@ -54,7 +54,7 @@ services:
       - omni-chat-network
     volumes:
       - ./backend:/app
-    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    command: uv run uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
   # Celery worker for AI task processing
   celery-worker:
@@ -79,7 +79,7 @@ services:
       - omni-chat-network
     volumes:
       - ./backend:/app
-    command: celery -A celery_app worker --loglevel=info --concurrency=4
+    command: uv run celery -A celery_app worker --loglevel=info --concurrency=4
 
   # Frontend React app
   frontend:
